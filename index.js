@@ -1,5 +1,6 @@
 // index.js — Recordatorious (MVP Free + feedback/UX/metrics + EDITAR)
-// Requisitos en .env: BOT_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY
+// Requisitos en .env (Railway Variables):
+//   BOT_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE (o SUPABASE_ANON_KEY), [OWNER_CHAT_ID opcional]
 
 require("dotenv").config();
 const { Bot, InlineKeyboard } = require("grammy");
@@ -8,10 +9,11 @@ const { createClient } = require("@supabase/supabase-js");
 // --- Env ---
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
-if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
-  console.error("❌ Falta configurar BOT_TOKEN, SUPABASE_URL o SUPABASE_ANON_KEY en .env");
+if (!BOT_TOKEN || !SUPABASE_URL || (!SUPABASE_SERVICE_ROLE && !SUPABASE_ANON_KEY)) {
+  console.error("❌ Falta configurar BOT_TOKEN, SUPABASE_URL y SUPABASE_SERVICE_ROLE o SUPABASE_ANON_KEY");
   process.exit(1);
 }
 
@@ -22,10 +24,8 @@ const OWNER_CHAT_ID = Number(process.env.OWNER_CHAT_ID || 0);
 const bot = new Bot(BOT_TOKEN);
 const supabase = createClient(
   SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE || SUPABASE_ANON_KEY
+  SUPABASE_SERVICE_ROLE || SUPABASE_ANON_KEY
 );
-
-
 
 // --- Utilidades ---
 const toPlainSpaces = (s) =>
@@ -44,6 +44,16 @@ const replySmart = async (ctx, text, extra) => {
   const parts = chunkText(text);
   for (const p of parts) await ctx.reply(p, extra);
 };
+
+// --- Throttle de feedback (cada 3 acciones) ---
+const ASK_EVERY = 3;
+const usageCounter = new Map(); // clave: `${userId}:${action}`
+function shouldAsk(userId, action) {
+  const key = `${userId}:${action}`;
+  const n = (usageCounter.get(key) || 0) + 1;
+  usageCounter.set(key, n);
+  return n % ASK_EVERY === 0;
+}
 
 // Parsing
 const DASH = "[-–—]"; // acepta -, – y —
@@ -65,7 +75,7 @@ const normalizeKey = (s) =>
     .replace(/\s+/g, " ")
     .trim();
 
-// --- Mensaje bienvenida (/start) en HTML ---
+// --- Mensajes ---
 const welcomeMsgHtml =
 `👋 ¡Hola! Espero que estés fenomenal.
 Soy <b>Reco</b>, tu micro-asistente personal en el chat para recordar cualquier dato simple.
@@ -93,13 +103,24 @@ Soy <b>Reco</b>, tu micro-asistente personal en el chat para recordar cualquier 
 • #talla zapato Juan - 42
 • #wifi casa - PepeWifi / clave123
 
-
 💡 <b>Nudge inicial:</b>  
 Guarda <b>ahora mismo</b> el dato que más veces repites o que quieres tener siempre a mano (ej: wifi, matrícula, clave bici).  
-Así verás en un segundo el poder de tenerlo rápido😉  
+Así verás en un segundo el poder de tenerlo rápido 😉  
 
 ¿Ideas o fallos? Escríbeme con /feedback.  
 ¡Gracias por probar Reco y que disfrutes la experiencia ✨!`;
+
+const helpMsg =
+`<b>Cómo usar Reco</b>
+Guarda: #nombre - valor
+Consulta: ?nombre
+Editar: ?+nombre - nuevo valor
+Borrar: -nombre
+Listar: ?*
+Ejemplos:
+• #wifi casa - PepeWifi / clave123
+• ?wifi casa
+• ?+wifi casa - nuevaClave456`;
 
 // --- /start con deep-link (mide origen con ?start=ig, ?start=qr, etc.) ---
 bot.command("start", async (ctx) => {
@@ -120,7 +141,17 @@ bot.command("start", async (ctx) => {
   await ctx.reply(welcomeMsgHtml, { parse_mode: "HTML", disable_web_page_preview: true });
 });
 
-// --- /whoami: te dice tu chat_id (una vez lo veas, puedes quitar este comando si quieres) ---
+// /help
+bot.command("help", async (ctx) => {
+  await ctx.reply(helpMsg, { parse_mode: "HTML", disable_web_page_preview: true });
+});
+
+// Alias sin slash
+bot.hears(/^start$/i,  (ctx)=>ctx.reply(welcomeMsgHtml,{parse_mode:"HTML",disable_web_page_preview:true}));
+bot.hears(/^help$/i,   (ctx)=>ctx.reply(helpMsg,{parse_mode:"HTML",disable_web_page_preview:true}));
+bot.hears(/^feedback$/i,(ctx)=>ctx.reply('Para enviar feedback escribe:\n/feedback Tu mensaje aquí'));
+
+// --- /whoami: te dice tu chat_id (puedes quitarlo después) ---
 bot.command("whoami", (ctx) => ctx.reply(`Tu chat_id es: ${ctx.from.id}`));
 
 // --- /feedback: guarda en DB y opcionalmente reenvía al OWNER_CHAT_ID ---
@@ -162,10 +193,11 @@ bot.on("callback_query:data", async (ctx) => {
 // --- Handler principal de texto ---
 bot.on("message:text", async (ctx) => {
   const incoming = toPlainSpaces(ctx.message.text || "");
+  // Divide tanto por saltos de línea como por nuevos "#"
   const lines = incoming
-  .split(/(?:\r?\n|(?=#))/)
-  .map(l => l.trim())
-  .filter(Boolean);
+    .split(/(?:\r?\n|(?=#))/)
+    .map(l => l.trim())
+    .filter(Boolean);
 
   const outputs = [];
 
@@ -175,10 +207,6 @@ bot.on("message:text", async (ctx) => {
       const m = line.match(/^\?\*\s*(\d+)?$/);
       const page = Math.max(1, parseInt(m?.[1] || "1", 10));
       const pageSize = 50;
-
-      const { data, error, count } = await supabase
-        .from("events"); // dummy to keep connection warm (optional)
-      void data; void error; void count;
 
       const res = await supabase
         .from("records")
@@ -195,7 +223,7 @@ bot.on("message:text", async (ctx) => {
         const total = res.count ?? res.data.length;
         const maxPage = Math.max(1, Math.ceil(total / pageSize));
         const header = `🗂️ Tus registros (página ${page}/${maxPage}, total ${total})`;
-        const body = res.data.map(r => `• ${r.key_text} - ${r.value}`).join("\n");
+        const body = res.data.map(r => `• #${r.key_text.replace(/^#/, "")} - ${r.value}`).join("\n");
         outputs.push(`${header}\n${body}\n\n➡️ Usa \`?* ${page + 1}\` para la siguiente página.`);
       }
       continue;
@@ -223,74 +251,61 @@ bot.on("message:text", async (ctx) => {
         ? `⚠️ Error guardando "${rawKey}": ${error.message}`
         : `✅ Guardado: "${rawKey}" → "${value}"`);
 
-      // (Opcional) pedir reacción
-      outputs.push("¿Te fue útil? (pulsa 👍/👎)");
-      await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("save") });
+      if (shouldAsk(ctx.from.id, "save")) {
+        await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("save") });
+      }
       continue;
     }
 
-    // 3) EDITAR (?+nombre - nuevo valor) — con UX de ayuda si falta el " - "
+    // 3) EDITAR (?+nombre - nuevo valor) — admite comillas o sin comillas
     if (/^\?\+/.test(line)) {
-      // a) ayuda si no trae " - valor"
-      const helpMatch = line.match(EDIT_HELP_RE);
-      if (helpMatch && !line.match(new RegExp(`${DASH}`))) {
-        const candidate = toPlainSpaces(helpMatch[1] || helpMatch[2] || "nombre").replace(/^"|"$/g, "");
-        outputs.push(
-          `Para editar usa:\n?+${candidate} - nuevo valor\n` +
-          `Ejemplos:\n• ?+wifi - 5678EFGH\n• ?+"cumple mama" - 17/09`
-        );
-        // no pedimos reacción aquí para no cansar
-        continue;
-      }
-
-      // b) parseo completo (quoted o unquoted)
-      let mm = line.match(EDIT_FULL_RE_QUOTED);
-      if (!mm) mm = line.match(EDIT_FULL_RE_UNQUOTED);
-
+      // Patrones: ?+"clave con espacios" - valor   |   ?+clave - valor
+      const mm = line.match(new RegExp(`^\\?\\+\\s*(?:"([^"]+)"|(.+?))\\s*${DASH}\\s*(.+)$`));
       if (!mm) {
-        outputs.push('Formato de edición no válido. Usa: ?+nombre - nuevo valor');
+        outputs.push(
+          "Formato de edición:\n" +
+          "?+nombre - nuevo valor\n" +
+          'Ej.: ?+"cumple john" - 11/12'
+        );
         continue;
       }
 
       const rawKey   = toPlainSpaces((mm[1] || mm[2] || "").replace(/^"|"$/g, ""));
-      const newValue = toPlainSpaces(mm[3]);
-      const keyNorm  = normalizeKey(rawKey);
+      const newValue = toPlainSpaces(mm[3] || "");
+      if (!rawKey) { outputs.push("Falta el nombre del recordatorio."); continue; }
+      if (!newValue) {
+        outputs.push(`El nuevo valor está vacío. Usa:\n?+${rawKey} - nuevo valor\nEj.: ?+wifi - 5678`);
+        continue;
+      }
+      const keyNorm = normalizeKey(rawKey);
 
-      // Intentamos actualizar por clave exacta (key_norm)
-      const upd = await supabase
+      // 1) Localizamos la fila exacta (obtenemos id) para evitar pisadas raras
+      const { data: row, error: findErr } = await supabase
         .from("records")
-        .update({ value: newValue, key_text: rawKey }) // actualizamos también el texto visible
+        .select("id,key_text,value")
         .eq("user_id", ctx.from.id)
         .eq("key_norm", keyNorm)
-        .select("key_text")
         .maybeSingle();
 
-      if (upd.error) {
-        outputs.push(`⚠️ Error editando "${rawKey}": ${upd.error.message}`);
-      } else if (!upd.data) {
-        // si no hay exacto, buscamos candidatos por ilike para ayudar
-        const suggest = await supabase
-          .from("records")
-          .select("key_text,value")
-          .eq("user_id", ctx.from.id)
-          .ilike("key_norm", `%${keyNorm}%`)
-          .limit(10);
+      if (findErr) { outputs.push(`⚠️ Error buscando "${rawKey}": ${findErr.message}`); continue; }
+      if (!row)    { outputs.push(`⚠️ No encontré "${rawKey}"`); continue; }
 
-        if (!suggest.error && suggest.data && suggest.data.length) {
-          outputs.push(
-            `⚠️ No encontré "${rawKey}" exacto.\n¿Te refieres a alguno de estos?\n` +
-            suggest.data.map(r => `• ${r.key_text} → ${r.value}`).join("\n")
-          );
-        } else {
-          outputs.push(`⚠️ No encontré "${rawKey}". Puedes crearlo con:\n#${rawKey} - ${newValue}`);
-        }
-      } else {
-        outputs.push(`✏️ "${upd.data.key_text}" actualizado → ${newValue} ✅`);
-        await supabase.from("events").insert({
-          user_id: ctx.from.id, type: "edit", meta: { key_norm: keyNorm }
-        });
+      // 2) Actualizamos SOLO esa fila por id
+      const { data: updated, error: upErr } = await supabase
+        .from("records")
+        .update({ value: newValue, key_text: rawKey }) // mantenemos key_text “bonito”
+        .eq("id", row.id)
+        .select("key_text,value")
+        .maybeSingle();
 
-        // pedir reacción muy de vez en cuando; aquí la dejo activa pero puedes quitarla si molesta
+      await supabase.from("events").insert({
+        user_id: ctx.from.id, type: "edit", meta: { key_norm: keyNorm }
+      });
+
+      if (upErr) outputs.push(`⚠️ Error actualizando "${rawKey}": ${upErr.message}`);
+      else       outputs.push(`📝 "${updated.key_text}" actualizado → ${updated.value} ✅`);
+
+      if (shouldAsk(ctx.from.id, "edit")) {
         await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("edit") });
       }
       continue;
@@ -316,10 +331,12 @@ bot.on("message:text", async (ctx) => {
 
       if (error) outputs.push(`⚠️ Error consultando "${q}": ${error.message}`);
       else if (!data || data.length === 0) outputs.push(`⚠️ No encontré "${q}"`);
-      else if (data.length === 1) outputs.push(`🔍 "${data[0].key_text}": ${data[0].value}`);
-      else outputs.push("🔎 Coincidencias:\n" + data.map(r => `• ${r.key_text} → ${r.value}`).join("\n"));
+      else if (data.length === 1) outputs.push(`🔍 #${data[0].key_text.replace(/^#/, "")} - ${data[0].value}`);
+      else outputs.push("🔎 Coincidencias:\n" + data.map(r => `• #${r.key_text.replace(/^#/, "")} - ${r.value}`).join("\n"));
 
-      await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("query") });
+      if (shouldAsk(ctx.from.id, "query")) {
+        await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("query") });
+      }
       continue;
     }
 
@@ -346,7 +363,9 @@ bot.on("message:text", async (ctx) => {
         : data ? `🗑️ Borrado: "${data.key_text}"`
               : `⚠️ No había nada con "${rawKey}"`);
 
-      await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("delete") });
+      if (shouldAsk(ctx.from.id, "delete")) {
+        await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("delete") });
+      }
       continue;
     }
 
