@@ -1,0 +1,13 @@
+# dependencias
+node_modules/
+
+# entornos
+.env
+.env.*
+!.env.example
+
+# archivos de backup/temporales
+*backup*
+*.log
+.DS_Store
+Thumbs.db
