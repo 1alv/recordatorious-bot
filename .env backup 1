@@ -1,0 +1,5 @@
+# Rename this file to .env and fill in your actual values
+BOT_TOKEN=8281547116:AAERnGSk54hhvttND4nYG44ef9pOm6ndcbg
+SUPABASE_URL=https://zzkrpyaharrxejxcavod.supabase.co
+SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp6a3JweWFoYXJyeGVqeGNhdm9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg0ODEyMjksImV4cCI6MjA3NDA1NzIyOX0.GHHHog9Nf3MlBQ2uDtVyMmRTmxg34pn5DnNskwTwCW4
+OWNER_CHAT_ID=511644904

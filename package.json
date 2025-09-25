@@ -1,0 +1,23 @@
+{
+  "name": "recordatorious-bot",
+  "version": "1.0.0",
+  "description": "Simple Telegram bot for storing and recalling short bits of information.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "grammy",
+    "supabase",
+    "recordatorious"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.5",
+    "grammy": "^1.22.2",
+    "dotenv": "^16.4.5"
+  }
+}
