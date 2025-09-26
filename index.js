@@ -1,6 +1,7 @@
-// index.js — Recordatorious (MVP Free + feedback/UX/metrics + EDITAR + PMF-early)
-// Requisitos en .env (Railway Variables):
-//   BOT_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE (o SUPABASE_ANON_KEY), [OWNER_CHAT_ID opcional]
+// index.js — Recordatorious (MVP + EDITAR + UX + PMF-early)
+// Variables (Railway → Variables):
+// BOT_TOKEN, SUPABASE_URL, (SUPABASE_SERVICE_ROLE o SUPABASE_ANON_KEY), OWNER_CHAT_ID (opcional)
+// OPCIONALES: LOCAL_TZ (por defecto Europe/Madrid), PMF_DEBUG_ALWAYS ("1" para forzar pregunta)
 
 require("dotenv").config();
 const { Bot, InlineKeyboard } = require("grammy");
@@ -11,45 +12,36 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const OWNER_CHAT_ID = Number(process.env.OWNER_CHAT_ID || 0);
+const LOCAL_TZ = process.env.LOCAL_TZ || "Europe/Madrid";
+const PMF_DEBUG_ALWAYS = process.env.PMF_DEBUG_ALWAYS === "1";
 
 if (!BOT_TOKEN || !SUPABASE_URL || (!SUPABASE_SERVICE_ROLE && !SUPABASE_ANON_KEY)) {
   console.error("❌ Falta configurar BOT_TOKEN, SUPABASE_URL y SUPABASE_SERVICE_ROLE o SUPABASE_ANON_KEY");
   process.exit(1);
 }
 
-// Si quieres, luego metemos OWNER_CHAT_ID en .env; por ahora 0 para que no reenvíe si no está:
-const OWNER_CHAT_ID = Number(process.env.OWNER_CHAT_ID || 0);
-
 // --- Clientes ---
 const bot = new Bot(BOT_TOKEN);
-const supabase = createClient(
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE || SUPABASE_ANON_KEY
-);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE || SUPABASE_ANON_KEY);
 
-// --- Utilidades ---
+// --- Utils ---
 const toPlainSpaces = (s) =>
-  (s || "")
-    .replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  (s || "").replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, " ").replace(/\s+/g, " ").trim();
 
 const chunkText = (text, size = 3800) => {
   const chunks = [];
   for (let i = 0; i < text.length; i += size) chunks.push(text.slice(i, i + size));
   return chunks;
 };
-
 const replySmart = async (ctx, text, extra) => {
   const parts = chunkText(text);
   for (const p of parts) await ctx.reply(p, extra);
 };
 
-const todayYMD = () => new Date().toISOString().split("T")[0];
-
-// --- Throttle de feedback (cada 3 acciones) ---
+// Throttle “¿Te fue útil?” cada 3 acciones
 const ASK_EVERY = 3;
-const usageCounter = new Map(); // clave: `${userId}:${action}`
+const usageCounter = new Map();
 function shouldAsk(userId, action) {
   const key = `${userId}:${action}`;
   const n = (usageCounter.get(key) || 0) + 1;
@@ -58,35 +50,23 @@ function shouldAsk(userId, action) {
 }
 
 // Parsing
-const DASH = "[-–—]"; // acepta -, – y —
-const SAVE_RE  = new RegExp(`^#\\s*(.+?)\\s*${DASH}\\s*(.+)$`, "i"); // #clave -/–/— valor
-const QUERY_RE = new RegExp("^\\?\\s*(.+)$");                         // ?clave
-const DEL_RE   = new RegExp("^-\\s*(.+)$");                           // -clave
-
-// EDITAR:
-//  - Completo: ?+nombre - nuevo valor   (soporta comillas en el nombre)
-//  - Ayuda:    ?+nombre                  (sin " - valor" → responde con guía)
-const EDIT_FULL_RE_QUOTED   = new RegExp(`^\\?\\+\\s*"([^"]+)"\\s*${DASH}\\s*(.+)$`, "i");
-const EDIT_FULL_RE_UNQUOTED = new RegExp(`^\\?\\+\\s*([^"]+?)\\s*${DASH}\\s*(.+)$`, "i");
-const EDIT_HELP_RE          = new RegExp(`^\\?\\+\\s*(?:"([^"]+)"|(.+))\\s*$`, "i");
+const DASH = "[-–—]";
+const SAVE_RE  = new RegExp(`^#\\s*(.+?)\\s*${DASH}\\s*(.+)$`, "i");
+const QUERY_RE = new RegExp("^\\?\\s*(.+)$");
+const DEL_RE   = new RegExp("^-\\s*(.+)$");
 
 const normalizeKey = (s) =>
   (s || "")
     .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // sin acentos
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 
-// --- Mensajes ---
-const welcomeMsgHtml =
-`👋 ¡Hola! Espero que estés fenomenal.
-Soy <b>Reco</b>, tu micro-asistente personal en el chat para recordar cualquier dato simple.
+// EDITAR
+const EDIT_FULL_RE = new RegExp(`^\\?\\+\\s*(?:"([^"]+)"|(.+?))\\s*${DASH}\\s*(.+)$`);
 
-📌 <b>¿Qué puedo hacer por ti?</b>
-• Guardar cumpleaños, claves, citas, notas rápidas… lo que quieras.  
-• Consultar cualquier dato en segundos.  
-• Editar y borrar cuando cambien las cosas.  
-• Listar todo lo tuyo en una sola página.  
+const welcomeMsgHtml =
+`👋 ¡Hola! Soy <b>Reco</b>, tu micro-asistente para recordar cosas simples.
 
 <b>Comandos básicos:</b>
 #nombre - valor   → guardar  
@@ -95,22 +75,8 @@ Soy <b>Reco</b>, tu micro-asistente personal en el chat para recordar cualquier 
 -nombre           → borrar  
 ?*                → listar todo  
 
-<b>Ejemplos:</b>
-• #tel mamá - 612345679
-• #candado bici - 1234
-• #clave tarjeta - 4321
-• #cita médico - 12/10 10:00h
-• #toma vitaminas - 08:00h cada día
-• #matrícula coche - 1234ABC
-• #talla zapato Juan - 42
-• #wifi casa - PepeWifi / clave123
-
-💡 <b>Nudge inicial:</b>  
-Guarda <b>ahora mismo</b> el dato que más veces repites o que quieres tener siempre a mano (ej: wifi, matrícula, clave bici).  
-Así verás en un segundo el poder de tenerlo rápido 😉  
-
-¿Ideas o fallos? Escríbeme con /feedback.  
-¡Gracias por probar Reco y que disfrutes la experiencia ✨!`;
+💡 Guarda ya el dato más útil (wifi, matrícula, clave bici…) y pruébalo 😉
+¿Ideas o fallos? /feedback`;
 
 const helpMsg =
 `<b>Cómo usar Reco</b>
@@ -119,176 +85,138 @@ Consulta: ?nombre
 Editar: ?+nombre - nuevo valor
 Borrar: -nombre
 Listar: ?*
-Ejemplos:
-• #wifi casa - PepeWifi / clave123
-• ?wifi casa
-• ?+wifi casa - nuevaClave456`;
+Ej.: #wifi casa - PepeWifi / clave123`;
 
-// --- Teclados ---
-const uxKeyboard = (action) =>
-  new InlineKeyboard()
-    .text("👍 Útil", `ux:${action}:1`)
-    .text("👎 No",   `ux:${action}:0`);
+// --- PMF early ---
+const PMF_MIN_DISTINCT_DAYS = 5;   // pide encuesta a partir de 5 días distintos
+const PMF_COOLDOWN_DAYS = 90;      // no repetir pregunta si contestó en últimos 90 días
 
-const pmfKeyboard = new InlineKeyboard()
-  .text("1️⃣ Nada", "pmf:1")
-  .text("2️⃣ Poco", "pmf:2")
-  .row()
-  .text("3️⃣ Algo", "pmf:3")
-  .text("4️⃣ Bastante", "pmf:4")
-  .row()
-  .text("5️⃣ Muchísimo", "pmf:5");
-
-// --- Helpers PMF ---
-async function hasAnsweredPMF(userId) {
-  const { data, error } = await supabase
-    .from("pmf_answers")
-    .select("id")
-    .eq("user_id", userId)
-    .limit(1)
-    .maybeSingle();
-  if (error && error.code !== "PGRST116") return false;
-  return !!data;
-}
-
-async function countDistinctLoginDays(userId) {
-  // Leemos eventos login_daily y contamos días únicos YYYY-MM-DD
+// Cuenta días distintos de uso desde los últimos 180 días (ajustado a tu zona)
+async function countDistinctUsageDays(userId) {
+  const since = new Date(Date.now() - 180 * 86400000).toISOString();
   const { data, error } = await supabase
     .from("events")
     .select("created_at")
     .eq("user_id", userId)
-    .eq("type", "login_daily")
-    .order("created_at", { ascending: false })
-    .limit(500);
+    .gte("created_at", since)
+    .order("created_at", { ascending: false });
+
   if (error || !data) return 0;
-  const days = new Set(
-    data.map(r => (new Date(r.created_at)).toISOString().split("T")[0])
-  );
+
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: LOCAL_TZ, year: "numeric", month: "2-digit", day: "2-digit"
+  });
+  const days = new Set();
+  for (const row of data) {
+    const d = new Date(row.created_at);
+    days.add(fmt.format(d)); // YYYY-MM-DD en tu zona
+  }
   return days.size;
+}
+
+async function lastPmfAnswerWithin(userId, days) {
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  const { data, error } = await supabase
+    .from("pmf_answers")
+    .select("created_at")
+    .eq("user_id", userId)
+    .gte("created_at", since)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (error) return false;
+  return (data && data.length > 0);
+}
+
+async function shouldAskPMF(userId) {
+  if (PMF_DEBUG_ALWAYS) return true;
+  const hasAnsweredRecently = await lastPmfAnswerWithin(userId, PMF_COOLDOWN_DAYS);
+  if (hasAnsweredRecently) return false;
+  const distinctDays = await countDistinctUsageDays(userId);
+  return distinctDays >= PMF_MIN_DISTINCT_DAYS;
 }
 
 async function maybeAskPMF(ctx) {
   const userId = ctx.from.id;
-  // condición: 5 días distintos de uso y aún no respondió
-  const [days, answered] = await Promise.all([
-    countDistinctLoginDays(userId),
-    hasAnsweredPMF(userId),
-  ]);
-  if (!answered && days >= 5) {
-    await ctx.reply("❓ <b>Encuesta rápida</b>: ¿Te sería muy molesto si no pudieras usar Reco?", {
-      parse_mode: "HTML",
-      reply_markup: pmfKeyboard
-    });
-  }
+  if (!(await shouldAskPMF(userId))) return;
+
+  const kb = new InlineKeyboard()
+    .text("1", "pmf:1").text("2", "pmf:2").text("3", "pmf:3").row()
+    .text("4", "pmf:4").text("5", "pmf:5");
+
+  await ctx.reply(
+    "🙏 Mini-encuesta: ¿Cuánto te molestaría NO poder usar Reco?\n(1 = nada, 5 = muchísimo)",
+    { reply_markup: kb }
+  );
 }
 
-// --- /start con deep-link (mide origen con ?start=ig, ?start=qr, etc.) ---
+// --- /start, /help, alias ---
 bot.command("start", async (ctx) => {
-  const payload = (ctx.match || "").trim(); // origen opcional
-  if (payload) {
-    await supabase.from("events").insert({
-      user_id: ctx.from.id,
-      type: "start",
-      meta: { source: payload }
-    });
-  } else {
-    await supabase.from("events").insert({
-      user_id: ctx.from.id,
-      type: "start",
-      meta: null
-    });
-  }
+  const payload = (ctx.match || "").trim();
+  await supabase.from("events").insert({
+    user_id: ctx.from.id, type: "start", meta: payload ? { source: payload } : null
+  });
   await ctx.reply(welcomeMsgHtml, { parse_mode: "HTML", disable_web_page_preview: true });
 });
-
-// /help
-bot.command("help", async (ctx) => {
-  await ctx.reply(helpMsg, { parse_mode: "HTML", disable_web_page_preview: true });
-});
-
-// /encuesta (manual)
-bot.command("encuesta", async (ctx) => {
-  await ctx.reply("❓ <b>Encuesta rápida</b>: ¿Te sería muy molesto si no pudieras usar Reco?", {
-    parse_mode: "HTML",
-    reply_markup: pmfKeyboard
-  });
-});
-
-// Alias sin slash
+bot.command("help", async (ctx) => ctx.reply(helpMsg, { parse_mode: "HTML", disable_web_page_preview: true }));
 bot.hears(/^start$/i,  (ctx)=>ctx.reply(welcomeMsgHtml,{parse_mode:"HTML",disable_web_page_preview:true}));
 bot.hears(/^help$/i,   (ctx)=>ctx.reply(helpMsg,{parse_mode:"HTML",disable_web_page_preview:true}));
-bot.hears(/^feedback$/i,(ctx)=>ctx.reply('Para enviar feedback escribe:\n/feedback Tu mensaje aquí'));
+bot.hears(/^feedback$/i,(ctx)=>ctx.reply('Escribe:\n/feedback Tu mensaje aquí'));
 
-// --- /whoami: te dice tu chat_id (puedes quitarlo después) ---
+// /whoami + /feedback
 bot.command("whoami", (ctx) => ctx.reply(`Tu chat_id es: ${ctx.from.id}`));
-
-// --- /feedback: guarda en DB y opcionalmente reenvía al OWNER_CHAT_ID ---
 bot.command("feedback", async (ctx) => {
   const raw = (ctx.message.text || "").replace(/^\/feedback\s*/i, "").trim();
-  if (!raw) {
-    return ctx.reply("✍️ Cuéntame qué mejorar. Ejemplo:\n/feedback Estaría bien exportar todo a TXT");
-  }
+  if (!raw) return ctx.reply("✍️ Ejemplo:\n/feedback Estaría bien exportar todo a TXT");
   await supabase.from("feedback").insert({ user_id: ctx.from.id, text: raw });
   if (OWNER_CHAT_ID) {
-    try {
-      await ctx.api.sendMessage(
-        OWNER_CHAT_ID,
-        `📝 Feedback de ${ctx.from.id} (@${ctx.from.username || "—"}):\n${raw}`
-      );
-    } catch {}
+    try { await ctx.api.sendMessage(OWNER_CHAT_ID, `📝 Feedback de ${ctx.from.id} (@${ctx.from.username || "—"}):\n${raw}`); } catch {}
   }
-  return ctx.reply("¡Muchas Gracias! 💚 Esto me ayuda para darte un mejor servicio. Feliz día 🤗");
+  return ctx.reply("¡Gracias! 💚 Me ayuda a mejorar.");
 });
 
-// --- Callback queries: primero PMF, luego UX 👍/👎 ---
+// PMF: comandos de control
+bot.command("encuesta", async (ctx) => { await maybeAskPMF(ctx); });
+bot.command("debugpmf", async (ctx) => {
+  const d = await countDistinctUsageDays(ctx.from.id);
+  const recent = await lastPmfAnswerWithin(ctx.from.id, PMF_COOLDOWN_DAYS);
+  await ctx.reply(
+    `PMF debug:\n- Días distintos: ${d}\n- Contestó últimos ${PMF_COOLDOWN_DAYS} días: ${recent}\n- Forzar por var: ${PMF_DEBUG_ALWAYS ? "sí" : "no"}\n` +
+    `→ ${(!recent && (d >= PMF_MIN_DISTINCT_DAYS)) || PMF_DEBUG_ALWAYS ? "PREGUNTARÍA" : "NO preguntaría"}`
+  );
+});
+
+// Reacciones rápidas (👍/👎)
+const uxKeyboard = (action) => new InlineKeyboard().text("👍 Útil", `ux:${action}:1`).text("👎 No", `ux:${action}:0`);
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data || "";
 
-  // PMF answers
-  if (data.startsWith("pmf:")) {
-    const score = parseInt(data.replace("pmf:", ""), 10);
-    if (score >= 1 && score <= 5) {
-      await supabase.from("pmf_answers").insert({
-        user_id: ctx.from.id,
-        score
-      });
-      await ctx.answerCallbackQuery({ text: "¡Gracias por tu respuesta! 🙌" });
-      return;
-    }
+  // PMF callback
+  const pmf = data.match(/^pmf:(1|2|3|4|5)$/);
+  if (pmf) {
+    const score = Number(pmf[1]);
+    await supabase.from("pmf_answers").insert({ user_id: ctx.from.id, score });
+    await ctx.answerCallbackQuery({ text: `¡Gracias! (${score}/5)` });
+    await ctx.reply("🙏 ¿Qué echarías más de menos si no pudieras usar Reco? (escribe /feedback tu comentario)");
+    return;
   }
 
-  // UX reactions
+  // UX quick reactions
   const m = data.match(/^ux:(save|query|delete|edit):(1|0)$/);
   if (!m) return ctx.answerCallbackQuery();
   const action = m[1];
   const useful = m[2] === "1";
-  await supabase.from("quick_reactions").insert({
-    user_id: ctx.from.id, action, useful
-  });
+  await supabase.from("quick_reactions").insert({ user_id: ctx.from.id, action, useful });
   await ctx.answerCallbackQuery({ text: useful ? "¡Gracias! 🙌" : "Gracias por avisar 💡" });
 });
 
-// --- Handler principal de texto ---
+// --- Handler principal ---
 bot.on("message:text", async (ctx) => {
   const incoming = toPlainSpaces(ctx.message.text || "");
-
-  // 🔹 Tracking diario (retención): cada mensaje cuenta como "login_daily"
-  await supabase.from("events").insert({
-    user_id: ctx.from.id,
-    type: "login_daily",
-    meta: { date: todayYMD() }
-  });
-
-  // Divide tanto por saltos de línea como por nuevos "#"
-  const lines = incoming
-    .split(/(?:\r?\n|(?=#))/)
-    .map(l => l.trim())
-    .filter(Boolean);
-
+  const lines = incoming.split(/(?:\r?\n|(?=#))/).map(l => l.trim()).filter(Boolean);
   const outputs = [];
 
   for (const line of lines) {
-    // 1) LISTAR TODO (?* o ?* <página>)
+    // 1) LISTAR TODO
     if (/^\?\*\s*\d*$/.test(line)) {
       const m = line.match(/^\?\*\s*(\d+)?$/);
       const page = Math.max(1, parseInt(m?.[1] || "1", 10));
@@ -301,11 +229,9 @@ bot.on("message:text", async (ctx) => {
         .order("created_at", { ascending: false })
         .range((page - 1) * pageSize, page * pageSize - 1);
 
-      if (res.error) {
-        outputs.push(`⚠️ Error listando: ${res.error.message}`);
-      } else if (!res.data || res.data.length === 0) {
-        outputs.push(page === 1 ? "📭 No tienes registros aún." : `📭 Página ${page} vacía.`);
-      } else {
+      if (res.error) outputs.push(`⚠️ Error listando: ${res.error.message}`);
+      else if (!res.data || res.data.length === 0) outputs.push(page === 1 ? "📭 No tienes registros aún." : `📭 Página ${page} vacía.`);
+      else {
         const total = res.count ?? res.data.length;
         const maxPage = Math.max(1, Math.ceil(total / pageSize));
         const header = `🗂️ Tus registros (página ${page}/${maxPage}, total ${total})`;
@@ -315,7 +241,7 @@ bot.on("message:text", async (ctx) => {
       continue;
     }
 
-    // 2) GUARDAR (#clave -/–/— valor)
+    // 2) GUARDAR
     let m = line.match(SAVE_RE);
     if (m) {
       const rawKey = toPlainSpaces(m[1]);
@@ -324,154 +250,100 @@ bot.on("message:text", async (ctx) => {
 
       const { error } = await supabase
         .from("records")
-        .upsert(
-          { user_id: ctx.from.id, key_norm: keyNorm, key_text: rawKey, value },
-          { onConflict: "user_id,key_norm" }
-        );
+        .upsert({ user_id: ctx.from.id, key_norm: keyNorm, key_text: rawKey, value }, { onConflict: "user_id,key_norm" });
 
-      await supabase.from("events").insert({
-        user_id: ctx.from.id, type: "save", meta: { key_norm: keyNorm }
-      });
+      await supabase.from("events").insert({ user_id: ctx.from.id, type: "save", meta: { key_norm: keyNorm } });
 
-      outputs.push(error
-        ? `⚠️ Error guardando "${rawKey}": ${error.message}`
-        : `✅ Guardado: "${rawKey}" → "${value}"`);
-
-      if (shouldAsk(ctx.from.id, "save")) {
-        await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("save") });
-      }
+      outputs.push(error ? `⚠️ Error guardando "${rawKey}": ${error.message}` : `✅ Guardado: "${rawKey}" → "${value}"`);
+      if (shouldAsk(ctx.from.id, "save")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("save") });
       continue;
     }
 
-    // 3) EDITAR (?+nombre - nuevo valor) — admite comillas o sin comillas
+    // 3) EDITAR
     if (/^\?\+/.test(line)) {
-      // Patrones: ?+"clave con espacios" - valor   |   ?+clave - valor
-      const mm = line.match(new RegExp(`^\\?\\+\\s*(?:"([^"]+)"|(.+?))\\s*${DASH}\\s*(.+)$`));
-      if (!mm) {
-        outputs.push(
-          "Formato de edición:\n" +
-          "?+nombre - nuevo valor\n" +
-          'Ej.: ?+"cumple john" - 11/12'
-        );
-        continue;
-      }
+      const mm = line.match(EDIT_FULL_RE);
+      if (!mm) { outputs.push('Formato: ?+nombre - nuevo valor\nEj.: ?+"cumple john" - 11/12'); continue; }
 
       const rawKey   = toPlainSpaces((mm[1] || mm[2] || "").replace(/^"|"$/g, ""));
       const newValue = toPlainSpaces(mm[3] || "");
       if (!rawKey) { outputs.push("Falta el nombre del recordatorio."); continue; }
-      if (!newValue) {
-        outputs.push(`El nuevo valor está vacío. Usa:\n?+${rawKey} - nuevo valor\nEj.: ?+wifi - 5678`);
-        continue;
-      }
+      if (!newValue) { outputs.push(`El nuevo valor está vacío. Usa: ?+${rawKey} - nuevo valor`); continue; }
       const keyNorm = normalizeKey(rawKey);
 
-      // 1) Localizamos la fila exacta (obtenemos id) para evitar pisadas raras
       const { data: row, error: findErr } = await supabase
-        .from("records")
-        .select("id,key_text,value")
-        .eq("user_id", ctx.from.id)
-        .eq("key_norm", keyNorm)
-        .maybeSingle();
+        .from("records").select("id,key_text,value")
+        .eq("user_id", ctx.from.id).eq("key_norm", keyNorm).maybeSingle();
 
       if (findErr) { outputs.push(`⚠️ Error buscando "${rawKey}": ${findErr.message}`); continue; }
       if (!row)    { outputs.push(`⚠️ No encontré "${rawKey}"`); continue; }
 
-      // 2) Actualizamos SOLO esa fila por id
       const { data: updated, error: upErr } = await supabase
-        .from("records")
-        .update({ value: newValue, key_text: rawKey }) // mantenemos key_text “bonito”
-        .eq("id", row.id)
-        .select("key_text,value")
-        .maybeSingle();
+        .from("records").update({ value: newValue, key_text: rawKey }).eq("id", row.id)
+        .select("key_text,value").maybeSingle();
 
-      await supabase.from("events").insert({
-        user_id: ctx.from.id, type: "edit", meta: { key_norm: keyNorm }
-      });
+      await supabase.from("events").insert({ user_id: ctx.from.id, type: "edit", meta: { key_norm: keyNorm } });
 
       if (upErr) outputs.push(`⚠️ Error actualizando "${rawKey}": ${upErr.message}`);
       else       outputs.push(`📝 "${updated.key_text}" actualizado → ${updated.value} ✅`);
 
-      if (shouldAsk(ctx.from.id, "edit")) {
-        await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("edit") });
-      }
+      if (shouldAsk(ctx.from.id, "edit")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("edit") });
       continue;
     }
 
-    // 4) CONSULTAR (?clave, también por prefijo)
+    // 4) CONSULTAR
     if (QUERY_RE.test(line)) {
       const q = toPlainSpaces(line.replace(/^\?\s*/, ""));
       const keyNorm = normalizeKey(q);
 
       const { data, error } = await supabase
-        .from("records")
-        .select("key_text,value")
+        .from("records").select("key_text,value")
         .eq("user_id", ctx.from.id)
-        .ilike("key_norm", `%${keyNorm}%`)
-        .limit(50);
+        .ilike("key_norm", `%${keyNorm}%`).limit(50);
 
-      await supabase.from("events").insert({
-        user_id: ctx.from.id,
-        type: "query",
-        meta: { key_norm: keyNorm, results: data ? data.length : 0 }
-      });
+      await supabase.from("events").insert({ user_id: ctx.from.id, type: "query", meta: { key_norm: keyNorm, results: data ? data.length : 0 } });
 
       if (error) outputs.push(`⚠️ Error consultando "${q}": ${error.message}`);
       else if (!data || data.length === 0) outputs.push(`⚠️ No encontré "${q}"`);
       else if (data.length === 1) outputs.push(`🔍 #${data[0].key_text.replace(/^#/, "")} - ${data[0].value}`);
       else outputs.push("🔎 Coincidencias:\n" + data.map(r => `• #${r.key_text.replace(/^#/, "")} - ${r.value}`).join("\n"));
 
-      if (shouldAsk(ctx.from.id, "query")) {
-        await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("query") });
-      }
+      if (shouldAsk(ctx.from.id, "query")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("query") });
       continue;
     }
 
-    // 5) BORRAR (-clave)
+    // 5) BORRAR
     m = line.match(DEL_RE);
     if (m) {
       const rawKey = toPlainSpaces(m[1]);
       const keyNorm = normalizeKey(rawKey);
 
       const { data, error } = await supabase
-        .from("records")
-        .delete()
-        .eq("user_id", ctx.from.id)
-        .eq("key_norm", keyNorm)
-        .select("key_text")
-        .maybeSingle();
+        .from("records").delete().eq("user_id", ctx.from.id).eq("key_norm", keyNorm)
+        .select("key_text").maybeSingle();
 
-      await supabase.from("events").insert({
-        user_id: ctx.from.id, type: "delete", meta: { key_norm: keyNorm }
-      });
+      await supabase.from("events").insert({ user_id: ctx.from.id, type: "delete", meta: { key_norm: keyNorm } });
 
-      outputs.push(error
-        ? `⚠️ Error borrando "${rawKey}": ${error.message}`
-        : data ? `🗑️ Borrado: "${data.key_text}"`
-              : `⚠️ No había nada con "${rawKey}"`);
+      outputs.push(error ? `⚠️ Error borrando "${rawKey}": ${error.message}`
+                         : data ? `🗑️ Borrado: "${data.key_text}"` : `⚠️ No había nada con "${rawKey}"`);
 
-      if (shouldAsk(ctx.from.id, "delete")) {
-        await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("delete") });
-      }
+      if (shouldAsk(ctx.from.id, "delete")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("delete") });
       continue;
     }
 
-    // 6) Formato no reconocido
+    // 6) No reconocido
     outputs.push(
       "⚠️ Formato no reconocido. Usa:\n" +
-      "#nombre - valor  (también vale – o —)\n" +
-      "Consultar: ?nombre  |  Listar todo: ?*\n" +
+      "#nombre - valor  (— o – también valen)\n" +
+      "Consultar: ?nombre  |  Listar: ?*\n" +
       "Editar: ?+nombre - nuevo valor  |  Borrar: -nombre"
     );
   }
 
-  // Respuesta principal
   await replySmart(ctx, outputs.join("\n"));
 
-  // 🔹 Pregunta PMF automática si cumple condición (≥ 5 días distintos de uso y sin respuesta previa)
+  // Al final de cada interacción, intentamos PMF
   await maybeAskPMF(ctx);
 });
 
 // --- Arranque ---
-bot.start({
-  onStart: () => console.log("✅ Recordatorious bot is running…")
-});
+bot.start({ onStart: () => console.log("✅ Recordatorious bot is running…") });
