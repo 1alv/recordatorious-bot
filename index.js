@@ -217,6 +217,70 @@ bot.command("feedback", async (ctx) => {
   return ctx.reply("¡Muchas Gracias! 💚 Me ayuda muchisimo a mejorar.");
 });
 
+// --- /stats: métricas básicas ---
+bot.command("stats", async (ctx) => {
+  // Total de recordatorios
+  const { count: recCount } = await supabase
+    .from("records")
+    .select("*", { count: "exact", head: true });
+
+  // Total de usuarios únicos
+  const { count: userCount } = await supabase
+    .from("events")
+    .select("user_id", { count: "exact", head: true });
+
+  // Últimos 7 días de actividad
+  const since = new Date(Date.now() - 7 * 86400000).toISOString();
+  const { count: active7d } = await supabase
+    .from("events")
+    .select("user_id", { count: "exact", head: true })
+    .gte("created_at", since);
+
+  await ctx.reply(
+    `📊 <b>Estadísticas Reco</b>\n\n` +
+    `• Recordatorios guardados: ${recCount ?? 0}\n` +
+    `• Usuarios únicos: ${userCount ?? 0}\n` +
+    `• Activos últimos 7 días: ${active7d ?? 0}`,
+    { parse_mode: "HTML" }
+  );
+});
+
+// --- /pmf: distribución respuestas PMF ---
+bot.command("pmf", async (ctx) => {
+  const { data, error } = await supabase
+    .from("pmf_answers")
+    .select("score");
+
+  if (error || !data) {
+    return ctx.reply("⚠️ Error leyendo PMF.");
+  }
+  if (data.length === 0) {
+    return ctx.reply("📭 Aún no hay respuestas PMF.");
+  }
+
+  const total = data.length;
+  const dist = [1,2,3,4,5].map(
+    s => ({
+      s,
+      n: data.filter(d => d.score === s).length
+    })
+  );
+
+  const pct = (n) => ((n / total) * 100).toFixed(1);
+
+  const lines = dist.map(d => `${d.s}: ${d.n} (${pct(d.n)}%)`);
+  const strong = dist.filter(d => d.s >= 4).reduce((sum, d) => sum + d.n, 0);
+
+  await ctx.reply(
+    `📊 <b>Resultados PMF</b>\n\n` +
+    lines.join("\n") + `\n\n` +
+    `Total: ${total}\n` +
+    `Usuarios que sufrirían (4–5): ${strong} (${pct(strong)}%)`,
+    { parse_mode: "HTML" }
+  );
+});
+
+
 // PMF: comandos de control
 bot.command("encuesta", async (ctx) => { await maybeAskPMF(ctx); });
 bot.command("debugpmf", async (ctx) => {
