@@ -1,4 +1,4 @@
-// index.js — Recordatorious (MVP + EDITAR + UX + PMF-early)
+// index.js — Recordatorious (MVP + EDITAR + UX throttle + PMF-early + feedback sin comando)
 // Variables (Railway → Variables):
 // BOT_TOKEN, SUPABASE_URL, (SUPABASE_SERVICE_ROLE o SUPABASE_ANON_KEY), OWNER_CHAT_ID (opcional)
 // OPCIONALES: LOCAL_TZ (por defecto Europe/Madrid), PMF_DEBUG_ALWAYS ("1" para forzar pregunta)
@@ -49,21 +49,35 @@ function shouldAsk(userId, action) {
   return n % ASK_EVERY === 0;
 }
 
+// --- Modo feedback sin comando (ventana temporal) ---
+const FEEDBACK_WINDOW_MS = 5 * 60 * 1000; // 5 minutos
+// Map<userId, expiresAtMs>
+const awaitingFeedback = new Map();
+function setAwaitingFeedback(userId) {
+  awaitingFeedback.set(userId, Date.now() + FEEDBACK_WINDOW_MS);
+}
+function isAwaitingFeedback(userId) {
+  const exp = awaitingFeedback.get(userId);
+  if (!exp) return false;
+  if (Date.now() > exp) {
+    awaitingFeedback.delete(userId);
+    return false;
+  }
+  return true;
+}
+function clearAwaitingFeedback(userId) {
+  awaitingFeedback.delete(userId);
+}
+
 // Parsing
 const DASH = "[-–—]";
 const SAVE_RE  = new RegExp(`^#\\s*(.+?)\\s*${DASH}\\s*(.+)$`, "i");
 const QUERY_RE = new RegExp("^\\?\\s*(.+)$");
 const DEL_RE   = new RegExp("^-\\s*(.+)$");
+const EDIT_FULL_RE = new RegExp(`^\\?\\+\\s*(?:"([^"]+)"|(.+?))\\s*${DASH}\\s*(.+)$`);
 
 const normalizeKey = (s) =>
-  (s || "")
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-// EDITAR
-const EDIT_FULL_RE = new RegExp(`^\\?\\+\\s*(?:"([^"]+)"|(.+?))\\s*${DASH}\\s*(.+)$`);
+  (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
 
 const welcomeMsgHtml =
 `👋 ¡Hola! Soy <b>Reco</b>, tu micro-asistente para recordar cosas simples.
@@ -76,7 +90,7 @@ const welcomeMsgHtml =
 ?*                → listar todo  
 
 💡 Guarda ya el dato más útil (wifi, matrícula, clave bici…) y pruébalo 😉
-¿Ideas o fallos? /feedback`;
+¿Ideas o fallos? Puedes contármelo escribiendo aquí mismo cuando te lo pregunte. Si quieres ahora: /idea + tu mensaje`;
 
 const helpMsg =
 `<b>Cómo usar Reco</b>
@@ -85,13 +99,14 @@ Consulta: ?nombre
 Editar: ?+nombre - nuevo valor
 Borrar: -nombre
 Listar: ?*
-Ej.: #wifi casa - PepeWifi / clave123`;
+Ej.: #wifi casa - PepeWifi / clave123
+
+¿Sugerencias o fallos? /idea + tu mensaje`;
 
 // --- PMF early ---
-const PMF_MIN_DISTINCT_DAYS = 5;   // pide encuesta a partir de 5 días distintos
-const PMF_COOLDOWN_DAYS = 90;      // no repetir pregunta si contestó en últimos 90 días
+const PMF_MIN_DISTINCT_DAYS = 5;
+const PMF_COOLDOWN_DAYS = 90;
 
-// Cuenta días distintos de uso desde los últimos 180 días (ajustado a tu zona)
 async function countDistinctUsageDays(userId) {
   const since = new Date(Date.now() - 180 * 86400000).toISOString();
   const { data, error } = await supabase
@@ -109,7 +124,7 @@ async function countDistinctUsageDays(userId) {
   const days = new Set();
   for (const row of data) {
     const d = new Date(row.created_at);
-    days.add(fmt.format(d)); // YYYY-MM-DD en tu zona
+    days.add(fmt.format(d));
   }
   return days.size;
 }
@@ -158,23 +173,40 @@ bot.command("start", async (ctx) => {
   await ctx.reply(welcomeMsgHtml, { parse_mode: "HTML", disable_web_page_preview: true });
 });
 bot.command("help", async (ctx) => ctx.reply(helpMsg, { parse_mode: "HTML", disable_web_page_preview: true }));
+
+// Alias sin slash para onboarding
 bot.hears(/^start$/i,  (ctx)=>ctx.reply(welcomeMsgHtml,{parse_mode:"HTML",disable_web_page_preview:true}));
 bot.hears(/^help$/i,   (ctx)=>ctx.reply(helpMsg,{parse_mode:"HTML",disable_web_page_preview:true}));
-bot.hears(/^feedback$/i,(ctx)=>ctx.reply('Escribe:\n/feedback Tu mensaje aquí'));
 
-// /whoami + /feedback
-bot.command("whoami", (ctx) => ctx.reply(`Tu chat_id es: ${ctx.from.id}`));
-bot.command("feedback", async (ctx) => {
-  const raw = (ctx.message.text || "").replace(/^\/feedback\s*/i, "").trim();
-  if (!raw) return ctx.reply("✍️ Ejemplo:\n/feedback Estaría bien exportar todo a TXT");
-  await supabase.from("feedback").insert({ user_id: ctx.from.id, text: raw });
+// Feedback: comandos y alias cortos (siguen existiendo, pero ya no son necesarios tras PMF)
+async function handleFeedback(ctx, rawText) {
+  const text = rawText.trim();
+  if (!text) return ctx.reply("✍️ Envíame tu idea así:\n/idea Tu mensaje aquí");
+  await supabase.from("feedback").insert({ user_id: ctx.from.id, text });
   if (OWNER_CHAT_ID) {
-    try { await ctx.api.sendMessage(OWNER_CHAT_ID, `📝 Feedback de ${ctx.from.id} (@${ctx.from.username || "—"}):\n${raw}`); } catch {}
+    try { await ctx.api.sendMessage(OWNER_CHAT_ID, `📝 Feedback de ${ctx.from.id} (@${ctx.from.username || "—"}):\n${text}`); } catch {}
   }
   return ctx.reply("¡Gracias! 💚 Me ayuda a mejorar.");
+}
+bot.command("feedback", async (ctx) => {
+  const raw = (ctx.message.text || "").replace(/^\/feedback\s*/i, "");
+  return handleFeedback(ctx, raw);
+});
+bot.command("idea", async (ctx) => {
+  const raw = (ctx.message.text || "").replace(/^\/idea\s*/i, "");
+  return handleFeedback(ctx, raw);
+});
+bot.command("opina", async (ctx) => {
+  const raw = (ctx.message.text || "").replace(/^\/opina\s*/i, "");
+  return handleFeedback(ctx, raw);
 });
 
-// PMF: comandos de control
+// Hints para quien escriba solo la palabra
+bot.hears(/^feedback$/i, (ctx)=>ctx.reply('Envíame tu idea así:\n/idea Tu mensaje aquí'));
+bot.hears(/^idea$/i,     (ctx)=>ctx.reply('Escribe:\n/idea Tu mensaje aquí'));
+bot.hears(/^opina$/i,    (ctx)=>ctx.reply('Escribe:\n/opina Tu mensaje aquí'));
+
+// PMF: control y debug
 bot.command("encuesta", async (ctx) => { await maybeAskPMF(ctx); });
 bot.command("debugpmf", async (ctx) => {
   const d = await countDistinctUsageDays(ctx.from.id);
@@ -185,7 +217,7 @@ bot.command("debugpmf", async (ctx) => {
   );
 });
 
-// Reacciones rápidas (👍/👎)
+// Reacciones rápidas (👍/👎) y PMF (1–5)
 const uxKeyboard = (action) => new InlineKeyboard().text("👍 Útil", `ux:${action}:1`).text("👎 No", `ux:${action}:0`);
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data || "";
@@ -196,7 +228,13 @@ bot.on("callback_query:data", async (ctx) => {
     const score = Number(pmf[1]);
     await supabase.from("pmf_answers").insert({ user_id: ctx.from.id, score });
     await ctx.answerCallbackQuery({ text: `¡Gracias! (${score}/5)` });
-    await ctx.reply("🙏 ¿Qué echarías más de menos si no pudieras usar Reco? (escribe /feedback tu comentario)");
+
+    // Activar modo "esperando feedback" sin comando (5 minutos)
+    setAwaitingFeedback(ctx.from.id);
+    await ctx.reply(
+      "🙏 Para ayudarme a mejorar, cuéntame aquí mismo en una frase: ¿qué echarías más de menos si no pudieras usar Reco?\n" +
+      "✍️ Escribe tu comentario ahora (sin comandos)."
+    );
     return;
   }
 
@@ -211,12 +249,37 @@ bot.on("callback_query:data", async (ctx) => {
 
 // --- Handler principal ---
 bot.on("message:text", async (ctx) => {
-  const incoming = toPlainSpaces(ctx.message.text || "");
+  const original = ctx.message.text || "";
+  const incoming = toPlainSpaces(original);
+
+  // 0) ¿Está el usuario en modo "esperando feedback"?
+  //    Si el mensaje NO parece un comando (#, ?, ?+, -, /), lo guardamos como feedback y salimos.
+  if (isAwaitingFeedback(ctx.from.id)) {
+    const looksLikeCommand =
+      /^#/.test(incoming) ||
+      /^\?(\+)?/.test(incoming) ||
+      /^-/.test(incoming) ||
+      /^\//.test(incoming);
+
+    if (!looksLikeCommand && incoming.length > 0) {
+      await supabase.from("feedback").insert({ user_id: ctx.from.id, text: incoming });
+      if (OWNER_CHAT_ID) {
+        try { await ctx.api.sendMessage(OWNER_CHAT_ID, `📝 Feedback (post-PMF) de ${ctx.from.id} (@${ctx.from.username || "—"}):\n${incoming}`); } catch {}
+      }
+      clearAwaitingFeedback(ctx.from.id);
+      await ctx.reply("¡Gracias por tu idea! 💚");
+      // seguimos sin procesar más (no es comando)
+      return;
+    }
+    // Si sí parecía comando, no consumimos el modo feedback; dejamos que se procese normal.
+  }
+
+  // 1) Soportar múltiples líneas / múltiples # en un mismo mensaje
   const lines = incoming.split(/(?:\r?\n|(?=#))/).map(l => l.trim()).filter(Boolean);
   const outputs = [];
 
   for (const line of lines) {
-    // 1) LISTAR TODO
+    // 1) LISTAR TODO (?* o ?* <página>)
     if (/^\?\*\s*\d*$/.test(line)) {
       const m = line.match(/^\?\*\s*(\d+)?$/);
       const page = Math.max(1, parseInt(m?.[1] || "1", 10));
@@ -241,7 +304,7 @@ bot.on("message:text", async (ctx) => {
       continue;
     }
 
-    // 2) GUARDAR
+    // 2) GUARDAR (#clave - valor)
     let m = line.match(SAVE_RE);
     if (m) {
       const rawKey = toPlainSpaces(m[1]);
@@ -259,7 +322,7 @@ bot.on("message:text", async (ctx) => {
       continue;
     }
 
-    // 3) EDITAR
+    // 3) EDITAR (?+nombre - nuevo valor)
     if (/^\?\+/.test(line)) {
       const mm = line.match(EDIT_FULL_RE);
       if (!mm) { outputs.push('Formato: ?+nombre - nuevo valor\nEj.: ?+"cumple john" - 11/12'); continue; }
@@ -290,7 +353,7 @@ bot.on("message:text", async (ctx) => {
       continue;
     }
 
-    // 4) CONSULTAR
+    // 4) CONSULTAR (?clave, también por prefijo)
     if (QUERY_RE.test(line)) {
       const q = toPlainSpaces(line.replace(/^\?\s*/, ""));
       const keyNorm = normalizeKey(q);
@@ -311,7 +374,7 @@ bot.on("message:text", async (ctx) => {
       continue;
     }
 
-    // 5) BORRAR
+    // 5) BORRAR (-clave)
     m = line.match(DEL_RE);
     if (m) {
       const rawKey = toPlainSpaces(m[1]);
@@ -335,13 +398,14 @@ bot.on("message:text", async (ctx) => {
       "⚠️ Formato no reconocido. Usa:\n" +
       "#nombre - valor  (— o – también valen)\n" +
       "Consultar: ?nombre  |  Listar: ?*\n" +
-      "Editar: ?+nombre - nuevo valor  |  Borrar: -nombre"
+      "Editar: ?+nombre - nuevo valor  |  Borrar: -nombre\n" +
+      "Sugerencias: /idea + tu mensaje"
     );
   }
 
   await replySmart(ctx, outputs.join("\n"));
 
-  // Al final de cada interacción, intentamos PMF
+  // Intentar PMF al final
   await maybeAskPMF(ctx);
 });
 
