@@ -1,4 +1,4 @@
-// index.js — Recordatorious (MVP Free + feedback/UX/metrics + EDITAR)
+// index.js — Recordatorious (MVP Free + feedback/UX/metrics + EDITAR + PMF-early)
 // Requisitos en .env (Railway Variables):
 //   BOT_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE (o SUPABASE_ANON_KEY), [OWNER_CHAT_ID opcional]
 
@@ -44,6 +44,8 @@ const replySmart = async (ctx, text, extra) => {
   const parts = chunkText(text);
   for (const p of parts) await ctx.reply(p, extra);
 };
+
+const todayYMD = () => new Date().toISOString().split("T")[0];
 
 // --- Throttle de feedback (cada 3 acciones) ---
 const ASK_EVERY = 3;
@@ -122,6 +124,64 @@ Ejemplos:
 • ?wifi casa
 • ?+wifi casa - nuevaClave456`;
 
+// --- Teclados ---
+const uxKeyboard = (action) =>
+  new InlineKeyboard()
+    .text("👍 Útil", `ux:${action}:1`)
+    .text("👎 No",   `ux:${action}:0`);
+
+const pmfKeyboard = new InlineKeyboard()
+  .text("1️⃣ Nada", "pmf:1")
+  .text("2️⃣ Poco", "pmf:2")
+  .row()
+  .text("3️⃣ Algo", "pmf:3")
+  .text("4️⃣ Bastante", "pmf:4")
+  .row()
+  .text("5️⃣ Muchísimo", "pmf:5");
+
+// --- Helpers PMF ---
+async function hasAnsweredPMF(userId) {
+  const { data, error } = await supabase
+    .from("pmf_answers")
+    .select("id")
+    .eq("user_id", userId)
+    .limit(1)
+    .maybeSingle();
+  if (error && error.code !== "PGRST116") return false;
+  return !!data;
+}
+
+async function countDistinctLoginDays(userId) {
+  // Leemos eventos login_daily y contamos días únicos YYYY-MM-DD
+  const { data, error } = await supabase
+    .from("events")
+    .select("created_at")
+    .eq("user_id", userId)
+    .eq("type", "login_daily")
+    .order("created_at", { ascending: false })
+    .limit(500);
+  if (error || !data) return 0;
+  const days = new Set(
+    data.map(r => (new Date(r.created_at)).toISOString().split("T")[0])
+  );
+  return days.size;
+}
+
+async function maybeAskPMF(ctx) {
+  const userId = ctx.from.id;
+  // condición: 5 días distintos de uso y aún no respondió
+  const [days, answered] = await Promise.all([
+    countDistinctLoginDays(userId),
+    hasAnsweredPMF(userId),
+  ]);
+  if (!answered && days >= 5) {
+    await ctx.reply("❓ <b>Encuesta rápida</b>: ¿Te sería muy molesto si no pudieras usar Reco?", {
+      parse_mode: "HTML",
+      reply_markup: pmfKeyboard
+    });
+  }
+}
+
 // --- /start con deep-link (mide origen con ?start=ig, ?start=qr, etc.) ---
 bot.command("start", async (ctx) => {
   const payload = (ctx.match || "").trim(); // origen opcional
@@ -144,6 +204,14 @@ bot.command("start", async (ctx) => {
 // /help
 bot.command("help", async (ctx) => {
   await ctx.reply(helpMsg, { parse_mode: "HTML", disable_web_page_preview: true });
+});
+
+// /encuesta (manual)
+bot.command("encuesta", async (ctx) => {
+  await ctx.reply("❓ <b>Encuesta rápida</b>: ¿Te sería muy molesto si no pudieras usar Reco?", {
+    parse_mode: "HTML",
+    reply_markup: pmfKeyboard
+  });
 });
 
 // Alias sin slash
@@ -172,14 +240,24 @@ bot.command("feedback", async (ctx) => {
   return ctx.reply("¡Muchas Gracias! 💚 Esto me ayuda para darte un mejor servicio. Feliz día 🤗");
 });
 
-// --- Reacciones rápidas (👍/👎) ---
-const uxKeyboard = (action) =>
-  new InlineKeyboard()
-    .text("👍 Útil", `ux:${action}:1`)
-    .text("👎 No",   `ux:${action}:0`);
-
+// --- Callback queries: primero PMF, luego UX 👍/👎 ---
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data || "";
+
+  // PMF answers
+  if (data.startsWith("pmf:")) {
+    const score = parseInt(data.replace("pmf:", ""), 10);
+    if (score >= 1 && score <= 5) {
+      await supabase.from("pmf_answers").insert({
+        user_id: ctx.from.id,
+        score
+      });
+      await ctx.answerCallbackQuery({ text: "¡Gracias por tu respuesta! 🙌" });
+      return;
+    }
+  }
+
+  // UX reactions
   const m = data.match(/^ux:(save|query|delete|edit):(1|0)$/);
   if (!m) return ctx.answerCallbackQuery();
   const action = m[1];
@@ -193,6 +271,14 @@ bot.on("callback_query:data", async (ctx) => {
 // --- Handler principal de texto ---
 bot.on("message:text", async (ctx) => {
   const incoming = toPlainSpaces(ctx.message.text || "");
+
+  // 🔹 Tracking diario (retención): cada mensaje cuenta como "login_daily"
+  await supabase.from("events").insert({
+    user_id: ctx.from.id,
+    type: "login_daily",
+    meta: { date: todayYMD() }
+  });
+
   // Divide tanto por saltos de línea como por nuevos "#"
   const lines = incoming
     .split(/(?:\r?\n|(?=#))/)
@@ -378,7 +464,11 @@ bot.on("message:text", async (ctx) => {
     );
   }
 
+  // Respuesta principal
   await replySmart(ctx, outputs.join("\n"));
+
+  // 🔹 Pregunta PMF automática si cumple condición (≥ 5 días distintos de uso y sin respuesta previa)
+  await maybeAskPMF(ctx);
 });
 
 // --- Arranque ---
