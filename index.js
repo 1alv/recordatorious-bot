@@ -249,7 +249,6 @@ bot.hears(/^nudges$/i, async (ctx) => {
   await ctx.reply("— Nudge 3 —\n" + nudge3Text(), { parse_mode: "Markdown" });
 });
 
-
 // /whoami + /feedback
 bot.command("whoami", (ctx) => ctx.reply(`Tu chat_id es: ${ctx.from.id}`));
 bot.command("feedback", async (ctx) => {
@@ -465,7 +464,6 @@ bot.command("top", async (ctx) => {
   }
 });
 
-
 // PMF: comandos de control
 bot.command("encuesta", async (ctx) => { await maybeAskPMF(ctx); });
 bot.command("debugpmf", async (ctx) => {
@@ -654,10 +652,23 @@ async function maybeSendNudges(ctx) {
   }
 }
 
+// Forzar nudge manual (solo admin)
+bot.command(["nudge", "nudges"], async (ctx) => {
+  if (!(OWNER_CHAT_ID && ctx.from?.id === OWNER_CHAT_ID)) {
+    return ctx.reply("Comando solo para admin.");
+  }
+  await maybeSendNudges(ctx);
+});
+
 // --- Handler principal ---
 bot.on("message:text", async (ctx) => {
   const original = ctx.message.text || "";
   const incoming = toPlainSpaces(original);
+
+  // 👉 Si es un comando (/algo), no lo parseamos aquí (evita “formato no reconocido”)
+  if (/^\/\w+/.test(incoming)) {
+    return;
+  }
 
   // 0) feedback libre post-PMF
   if (isAwaitingFeedback(ctx.from.id)) {
@@ -680,12 +691,11 @@ bot.on("message:text", async (ctx) => {
   }
 
   // 0-bis) Frases “borrar/borra todo(s) …” → confirmación
-if (/\bborra(r)?\s+todos?\b/i.test(incoming)) {
+  if (/\bborra(r)?\s+todos?\b/i.test(incoming)) {
     await ctx.reply("⚠️ ¿Seguro que quieres <b>borrar TODOS</b> tus recordatorios? Esta acción no se puede deshacer.", {
       parse_mode: "HTML",
       reply_markup: wipeKb
     });
-    // Métrica
     await supabase.from("events").insert({ user_id: ctx.from.id, type: "wipe_prompt", meta: null });
     return;
   }
