@@ -1,4 +1,4 @@
-// index.js — Recordatorious (MVP + EDITAR + UX + PMF-early + feedback post-PMF + métricas avanzadas)
+// index.js — Recordatorious (MVP + EDITAR + UX + PMF-early + feedback post-PMF + métricas avanzadas + Nudges + PrettyList)
 // Variables (Railway → Variables):
 // BOT_TOKEN, SUPABASE_URL, (SUPABASE_SERVICE_ROLE o SUPABASE_ANON_KEY), OWNER_CHAT_ID (opcional)
 // OPCIONALES: LOCAL_TZ (por defecto Europe/Madrid), PMF_DEBUG_ALWAYS ("1" para forzar PMF)
@@ -99,6 +99,41 @@ const normalizeKey = (s) =>
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+
+// === Pretty list: convierte "1. a 2. b 3. c" o "• a - b" en líneas ===
+function prettyList(value) {
+  if (!value) return "";
+  if (/\n/.test(value)) return value; // ya es multilínea
+
+  // Separa por numeraciones (1. 2) 3.) o bullets (• · - – —)
+  const parts = value
+    .split(/\s*(?:\d+[.)]|[•·\-–—])\s+/)
+    .map(v => v.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2) {
+    // Re-numera limpio 1..n
+    return parts.map((p, i) => `${i + 1}. ${p}`).join("\n");
+  }
+
+  // fallback: no parecía lista; intenta por ';' o ' · ' o '  -  '
+  const parts2 = value.split(/\s*[;|•]\s+|\s+-\s+|\s+\|\s+/).map(v=>v.trim()).filter(Boolean);
+  if (parts2.length >= 2) {
+    return parts2.map((p, i) => `${i + 1}. ${p}`).join("\n");
+  }
+
+  return value;
+}
+
+// Para mostrar un registro en una sola “tarjeta” amable
+function renderRecordLine(keyText, value) {
+  const v = prettyList(value);
+  const niceKey = `#${String(keyText || "").replace(/^#/, "")}`;
+  if (/\n/.test(v)) {
+    return `${niceKey}  - \n${v}`;
+  }
+  return `${niceKey}  - ${v}`;
+}
 
 // --- Mensajes (tu bienvenida intacta) ---
 const welcomeMsgHtml =
@@ -223,50 +258,53 @@ bot.command("feedback", async (ctx) => {
   return ctx.reply("¡Muchas Gracias! 💚 Me ayuda muchisimo a mejorar.");
 });
 
-// --- /stats: métricas mejoradas ---
+// --- /stats: métricas mejoradas (excluye OWNER_CHAT_ID si existe) ---
 bot.command("stats", async (ctx) => {
   try {
-    // Total de recordatorios
-    const { count: recCount } = await supabase.from("records").select("*", { count: "exact", head: true });
+    const excludeOwner = !!OWNER_CHAT_ID;
 
-    // Usuarios únicos de verdad (últimos 365 días para no traer infinito)
+    // Total de recordatorios
+    let recCount = 0;
+    {
+      let q = supabase.from("records").select("*", { count: "exact", head: true });
+      if (excludeOwner) q = q.neq("user_id", OWNER_CHAT_ID);
+      const { count } = await q;
+      recCount = count ?? 0;
+    }
+
+    // Usuarios únicos de verdad (12 meses)
     const since365 = new Date(Date.now() - 365 * 86400000).toISOString();
-    const { data: evAll } = await supabase
-      .from("events")
-      .select("user_id, type, created_at, meta")
-      .gte("created_at", since365)
-      .limit(100000);
+    let qAll = supabase.from("events").select("user_id, type, created_at, meta").gte("created_at", since365).limit(100000);
+    if (excludeOwner) qAll = qAll.neq("user_id", OWNER_CHAT_ID);
+    const { data: evAll } = await qAll;
     const uniqAll = new Set((evAll || []).map(e => e.user_id)).size;
 
     // Activos últimos 7 días
     const since7 = new Date(Date.now() - 7 * 86400000).toISOString();
-    const { data: ev7d } = await supabase
-      .from("events")
-      .select("user_id")
-      .gte("created_at", since7)
-      .limit(100000);
+    let q7 = supabase.from("events").select("user_id").gte("created_at", since7).limit(100000);
+    if (excludeOwner) q7 = q7.neq("user_id", OWNER_CHAT_ID);
+    const { data: ev7d } = await q7;
     const active7d = new Set((ev7d || []).map(e => e.user_id)).size;
 
     // Error rate por formato no reconocido (últimos 30 días)
     const since30 = new Date(Date.now() - 30 * 86400000).toISOString();
-    const { data: ev30 } = await supabase
+    let q30 = supabase
       .from("events")
-      .select("type, created_at")
+      .select("type, created_at, user_id")
       .gte("created_at", since30)
       .in("type", ["save", "query", "edit", "delete", "list", "unrecognized"])
       .limit(100000);
+    if (excludeOwner) q30 = q30.neq("user_id", OWNER_CHAT_ID);
+    const { data: ev30 } = await q30;
     const totalTracked = (ev30 || []).length;
     const unrec = (ev30 || []).filter(e => e.type === "unrecognized").length;
     const errRate = totalTracked ? (unrec / totalTracked) : 0;
 
-    // Retención 7 días (cohorte primeros 30 días)
-    const since60 = new Date(Date.now() - 60 * 86400000).toISOString(); // margen para cubrir semanas
-    const { data: ev60 } = await supabase
-      .from("events")
-      .select("user_id, created_at")
-      .gte("created_at", since60)
-      .order("created_at", { ascending: true })
-      .limit(100000);
+    // Retención 7 días (cohorte 30 días) — excluye owner
+    const since60 = new Date(Date.now() - 60 * 86400000).toISOString();
+    let q60 = supabase.from("events").select("user_id, created_at").gte("created_at", since60).order("created_at", { ascending: true }).limit(100000);
+    if (excludeOwner) q60 = q60.neq("user_id", OWNER_CHAT_ID);
+    const { data: ev60 } = await q60;
 
     const firstSeen = new Map(); // userId -> firstDate
     const daysWithinWeek = new Map(); // userId -> Set(YYYY-MM-DD) dentro de la primera semana
@@ -299,7 +337,7 @@ bot.command("stats", async (ctx) => {
 
     await ctx.reply(
       `📊 <b>Estadísticas Reco</b>\n\n` +
-      `• Recordatorios guardados: <b>${recCount ?? 0}</b>\n` +
+      `• Recordatorios guardados: <b>${recCount}</b>\n` +
       `• Usuarios únicos (12 meses): <b>${uniqAll}</b>\n` +
       `• Activos últimos 7 días: <b>${active7d}</b>\n` +
       `• Fallos de formato (30d): <b>${(errRate * 100).toFixed(1)}%</b>  (${unrec}/${totalTracked})\n` +
@@ -313,7 +351,9 @@ bot.command("stats", async (ctx) => {
 
 // --- /pmf: distribución respuestas PMF ---
 bot.command("pmf", async (ctx) => {
-  const { data, error } = await supabase.from("pmf_answers").select("score");
+  let q = supabase.from("pmf_answers").select("score");
+  if (OWNER_CHAT_ID) q = q.neq("user_id", OWNER_CHAT_ID); // por coherencia
+  const { data, error } = await q;
   if (error || !data) return ctx.reply("📭 Aún no hay respuestas PMF.");
   if (data.length === 0) return ctx.reply("📭 Aún no hay respuestas PMF.");
 
@@ -336,7 +376,7 @@ bot.command("top", async (ctx) => {
     return ctx.reply("Comando solo para admin.");
   }
   const raw = (ctx.match || "").trim();
-  const isYMD = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+  const isYMD = (s) => /^\d{4}-\d{2}\-\d{2}$/.test(s);
 
   let since, until, label;
   if (!raw) {
@@ -377,12 +417,15 @@ bot.command("top", async (ctx) => {
       return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
     };
 
-    const { data: saves } = await supabase
-      .from("events").select("meta, created_at")
-      .eq("type", "save").gte("created_at", since).lt("created_at", until);
-    const { data: queries } = await supabase
-      .from("events").select("meta, created_at")
-      .eq("type", "query").gte("created_at", since).lt("created_at", until);
+    let qSaves = supabase.from("events").select("meta, created_at, user_id").eq("type", "save").gte("created_at", since).lt("created_at", until);
+    let qQueries = supabase.from("events").select("meta, created_at, user_id").eq("type", "query").gte("created_at", since).lt("created_at", until);
+    if (OWNER_CHAT_ID) {
+      qSaves = qSaves.neq("user_id", OWNER_CHAT_ID);
+      qQueries = qQueries.neq("user_id", OWNER_CHAT_ID);
+    }
+
+    const { data: saves } = await qSaves;
+    const { data: queries } = await qQueries;
 
     const topSaves = tally(saves);
     const topQueries = tally(queries);
@@ -440,6 +483,133 @@ bot.on("callback_query:data", async (ctx) => {
   await ctx.answerCallbackQuery({ text: useful ? "¡Muchas Gracias! 🙌" : "Muchas Gracias por avisar 💡" });
 });
 
+// === NUDGES ===================================================================
+// Textos (dos variantes por nudge, rota aleatoriamente)
+function nudge1Text() {
+  const A =
+`👋 ¡Hey! Aún no has guardado nada en Reco.
+Prueba con algo 100% cotidiano que usarás luego en segundos:
+• Lista corta de compra → \`#compra octubre - 1. Plátanos  2. Huevos  3. Papel higiénico\`
+• Cita dentista → \`#cita dentista - 15/11 16:00h\`
+Tu “yo del futuro” te lo va a agradecer 😅`;
+  const B =
+`🤔 Si sigues con la cabeza, se te van a caer los datos…
+Guarda 1 cosa útil ahora y pruébame mañana con \`?palabra\`:
+• PIN parking → \`#pin parking - 2781\`
+• Pedido online → \`#pedido Amazon - 113-998877\`
+5 segundos para guardar; 1 segundo para encontrar 😉`;
+  return Math.random() < 0.5 ? A : B;
+}
+function nudge2Text() {
+  const A =
+`🔓 Con 3 cositas guardadas Reco empieza a brillar.
+Inspo rápida y muy real:
+• Wifi → \`#wifi casa - PepeWifi / clave123\`
+• Lista compra → \`#compra - 1. Leche  2. Pan  3. Huevos\`
+• Cita → \`#cita pediatra - 10/10 09:30h\`
+Tres toques y tienes memoria turbo 💪`;
+  const B =
+`Ya guardaste 1 (¡bien!). Sube a 3 y verás la magia de \`?*\`.
+Ideas que salvan el día:
+• Matrícula → \`#matrícula coche - 1234ABC\`
+• Factura → \`#factura luz - vence 12/11\`
+• Extraescolar → \`#clase inglés - lunes 17:30h\`
+Cuando lo necesites… aparecerá en 1 segundo.`;
+  return Math.random() < 0.5 ? A : B;
+}
+function nudge3Text() {
+  const A =
+`🧱 Con 3 ya vas rápido; con 4–5 es teletransporte.
+¿Qué te falta?
+• Seguro coche → \`#seguro coche - póliza 998877\`
+• NIF cliente → \`#cliente X - NIF B-12345678\`
+• Vuelo → \`#vuelo Madrid - IB1234 salida 08:00\`
+Ese “lo tenía en la punta de la lengua”… ya no 🤟`;
+  const B =
+`Estás a 1 nota de convertir Reco en tu bolsillo pro.
+Añade una súper cotidiana y pruébame mañana:
+• Compra finde → \`#compra finde - 1. Café  2. Arroz  3. Papel higiénico\`
+• Cita dentista → \`#dentista - 21/10 12:00h\`
+• PIN que siempre olvidas → \`#pin trastero - 5402\`
+Mañana escribe \`?compra\` o \`?pin\` y voilá 😄`;
+  return Math.random() < 0.5 ? A : B;
+}
+
+// Helpers para nudges
+async function getRecordCount(uid) {
+  const { count } = await supabase.from("records").select("*", { count: "exact", head: true }).eq("user_id", uid);
+  return count ?? 0;
+}
+async function lastEventAt(uid, type) {
+  const { data } = await supabase
+    .from("events")
+    .select("created_at")
+    .eq("user_id", uid)
+    .eq("type", type)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  return (data && data[0]) ? new Date(data[0].created_at) : null;
+}
+async function nudgeAlreadySentWithin(uid, nudgeType, days) {
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  const { data } = await supabase
+    .from("events")
+    .select("id")
+    .eq("user_id", uid)
+    .eq("type", nudgeType)
+    .gte("created_at", since)
+    .limit(1);
+  return !!(data && data.length);
+}
+
+// Reglas:
+// - NUDGE 1: 0 guardados, han pasado ≥24h desde /start y no enviado nudge1 en 7d
+// - NUDGE 2: 1 guardado, han pasado ≥48h desde último save y no enviado nudge2 en 14d
+// - NUDGE 3: exactamente 3 guardados, han pasado ≥5 días desde último save y no enviado nudge3 en 30d
+async function maybeSendNudges(ctx) {
+  const uid = ctx.from.id;
+
+  const recCount = await getRecordCount(uid);
+
+  // Nudge 1
+  if (recCount === 0) {
+    const st = await lastEventAt(uid, "start");
+    if (st && (Date.now() - st.getTime()) >= 24 * 3600 * 1000) {
+      if (!(await nudgeAlreadySentWithin(uid, "nudge1", 7))) {
+        await ctx.reply(nudge1Text(), { parse_mode: "Markdown" });
+        await supabase.from("events").insert({ user_id: uid, type: "nudge1", meta: null });
+        return;
+      }
+    }
+  }
+
+  // Nudge 2
+  if (recCount === 1) {
+    const lastSave = await lastEventAt(uid, "save");
+    if (lastSave && (Date.now() - lastSave.getTime()) >= 48 * 3600 * 1000) {
+      if (!(await nudgeAlreadySentWithin(uid, "nudge2", 14))) {
+        await ctx.reply(nudge2Text(), { parse_mode: "Markdown" });
+        await supabase.from("events").insert({ user_id: uid, type: "nudge2", meta: null });
+        return;
+      }
+    }
+  }
+
+  // Nudge 3
+  if (recCount === 3) {
+    const lastSave = await lastEventAt(uid, "save");
+    if (lastSave && (Date.now() - lastSave.getTime()) >= 5 * 24 * 3600 * 1000) {
+      if (!(await nudgeAlreadySentWithin(uid, "nudge3", 30))) {
+        await ctx.reply(nudge3Text(), { parse_mode: "Markdown" });
+        await supabase.from("events").insert({ user_id: uid, type: "nudge3", meta: null });
+        return;
+      }
+    }
+  }
+}
+
+// === FIN NUDGES ===============================================================
+
 // --- Handler principal ---
 bot.on("message:text", async (ctx) => {
   const original = ctx.message.text || "";
@@ -475,23 +645,28 @@ bot.on("message:text", async (ctx) => {
       const page = Math.max(1, parseInt(m?.[1] || "1", 10));
       const pageSize = 50;
 
-      const res = await supabase
+      let q = supabase
         .from("records")
         .select("key_text,value", { count: "exact" })
         .eq("user_id", ctx.from.id)
         .order("created_at", { ascending: false })
         .range((page - 1) * pageSize, page * pageSize - 1);
 
+      const res = await q;
+
       // Log de evento para métricas
       await supabase.from("events").insert({ user_id: ctx.from.id, type: "list", meta: null });
 
       if (res.error) outputs.push(`⚠️ Error listando: ${res.error.message}`);
-      else if (!res.data || res.data.length === 0) outputs.push(page === 1 ? "📭 No tienes registros aún." : `📭 Página ${page} vacía.`);
-      else {
+      else if (!res.data || res.data.length === 0) {
+        outputs.push(page === 1 ? "📭 No tienes registros aún." : `📭 Página ${page} vacía.`);
+      } else {
         const total = res.count ?? res.data.length;
         const maxPage = Math.max(1, Math.ceil(total / pageSize));
         const header = `🗂️ Tus registros (página ${page}/${maxPage}, total ${total})`;
-        const body = res.data.map(r => `• #${r.key_text.replace(/^#/, "")} - ${r.value}`).join("\n");
+        const body = res.data
+          .map(r => renderRecordLine(r.key_text, r.value))
+          .join("\n\n");
         outputs.push(`${header}\n${body}\n\n➡️ Usa \`?* ${page + 1}\` para la siguiente página.`);
       }
       continue;
@@ -510,7 +685,9 @@ bot.on("message:text", async (ctx) => {
 
       await supabase.from("events").insert({ user_id: ctx.from.id, type: "save", meta: { key_norm: keyNorm } });
 
-      outputs.push(error ? `⚠️ Error guardando "${rawKey}": ${error.message}` : `✅ Guardado: "${rawKey}" → "${value}"`);
+      const nice = renderRecordLine(rawKey, value);
+      outputs.push(error ? `⚠️ Error guardando "${rawKey}": ${error.message}` : `✅ Guardado:\n${nice}`);
+
       if (shouldAsk(ctx.from.id, "save")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("save") });
       continue;
     }
@@ -540,7 +717,10 @@ bot.on("message:text", async (ctx) => {
       await supabase.from("events").insert({ user_id: ctx.from.id, type: "edit", meta: { key_norm: keyNorm } });
 
       if (upErr) outputs.push(`⚠️ Error actualizando "${rawKey}": ${upErr.message}`);
-      else       outputs.push(`📝 "${updated.key_text}" actualizado → ${updated.value} ✅`);
+      else {
+        const nice = renderRecordLine(updated.key_text, updated.value);
+        outputs.push(`📝 Actualizado:\n${nice} ✅`);
+      }
 
       if (shouldAsk(ctx.from.id, "edit")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("edit") });
       continue;
@@ -551,17 +731,23 @@ bot.on("message:text", async (ctx) => {
       const q = toPlainSpaces(line.replace(/^\?\s*/, ""));
       const keyNorm = normalizeKey(q);
 
-      const { data, error } = await supabase
+      let qr = supabase
         .from("records").select("key_text,value")
         .eq("user_id", ctx.from.id)
         .ilike("key_norm", `%${keyNorm}%`).limit(50);
+
+      const { data, error } = await qr;
 
       await supabase.from("events").insert({ user_id: ctx.from.id, type: "query", meta: { key_norm: keyNorm, results: data ? data.length : 0 } });
 
       if (error) outputs.push(`⚠️ Error consultando "${q}": ${error.message}`);
       else if (!data || data.length === 0) outputs.push(`⚠️ No encontré "${q}"`);
-      else if (data.length === 1) outputs.push(`🔍 #${data[0].key_text.replace(/^#/, "")} - ${data[0].value}`);
-      else outputs.push("🔎 Coincidencias:\n" + data.map(r => `• #${r.key_text.replace(/^#/, "")} - ${r.value}`).join("\n"));
+      else if (data.length === 1) {
+        const r = data[0];
+        outputs.push(`🔍 ${renderRecordLine(r.key_text, r.value)}`);
+      } else {
+        outputs.push("🔎 Coincidencias:\n" + data.map(r => `• ${renderRecordLine(r.key_text, r.value)}`).join("\n\n"));
+      }
 
       if (shouldAsk(ctx.from.id, "query")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("query") });
       continue;
@@ -600,7 +786,11 @@ bot.on("message:text", async (ctx) => {
 
   // PMF al final de cada interacción
   await maybeAskPMF(ctx);
+
+  // NUDGES al final (no bloquea y respeta ventanas)
+  await maybeSendNudges(ctx);
 });
 
 // --- Arranque ---
 bot.start({ onStart: () => console.log("✅ Recordatorious bot is running…") });
+
