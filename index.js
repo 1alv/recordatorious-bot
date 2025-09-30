@@ -241,6 +241,15 @@ bot.hears(/^start$/i,  (ctx)=>ctx.reply(welcomeMsgHtml,{parse_mode:"HTML",disabl
 bot.hears(/^help$/i,   (ctx)=>ctx.reply(helpMsg,{parse_mode:"HTML",disable_web_page_preview:true}));
 bot.hears(/^feedback$/i,(ctx)=>ctx.reply('Escribe:\n/feedback Tu mensaje aquí'));
 
+// Atajo privado: escribir "nudges" muestra los 3 mensajes de prueba (solo admin)
+bot.hears(/^nudges$/i, async (ctx) => {
+  if (!(OWNER_CHAT_ID && ctx.from?.id === OWNER_CHAT_ID)) return; // ignora si no eres admin
+  await ctx.reply("— Nudge 1 —\n" + nudge1Text(), { parse_mode: "Markdown" });
+  await ctx.reply("— Nudge 2 —\n" + nudge2Text(), { parse_mode: "Markdown" });
+  await ctx.reply("— Nudge 3 —\n" + nudge3Text(), { parse_mode: "Markdown" });
+});
+
+
 // /whoami + /feedback
 bot.command("whoami", (ctx) => ctx.reply(`Tu chat_id es: ${ctx.from.id}`));
 bot.command("feedback", async (ctx) => {
@@ -508,7 +517,10 @@ function nudge1Text() {
   const A =
 `👋 ¡Hey! Aún no has guardado nada en Reco.
 Prueba con algo 100% cotidiano que usarás luego en segundos:
-• Lista corta de compra → \`#compra octubre - 1. Plátanos  2. Huevos  3. Papel higiénico\`
+• Lista corta de compra → \`#compra octubre - 
+1. Plátanos  
+2. Huevos  
+3. Papel higiénico\`
 • Cita dentista → \`#cita dentista - 15/11 16:00h\`
 Tu “yo del futuro” te lo va a agradecer 😅`;
   const B =
