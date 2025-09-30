@@ -170,11 +170,13 @@ Así verás en un segundo el poder de tenerlo rápido 😉
 
 const helpMsg =
 `<b>Cómo usar Reco</b>
-Guarda: #nombre - valor
-Consulta: ?nombre
-Editar: ?+nombre - nuevo valor
-Borrar: -nombre
-Listar: ?*
+• Guarda: #nombre - valor
+• Consulta: ?nombre
+• Editar: ?+nombre - nuevo valor
+• Borrar: -nombre
+• Borrar todo: escribe “borrar todo” o “borra todo” (te pediré confirmación)
+• Listar: ?*
+
 Ej.: #wifi casa - PepeWifi / clave123`;
 
 // --- PMF early ---
@@ -647,8 +649,8 @@ bot.on("message:text", async (ctx) => {
     }
   }
 
-  // 0-bis) Frases “borrar todo(s) …” → confirmación
-  if (/\bborrar\s+todos?\b/i.test(incoming)) {
+  // 0-bis) Frases “borrar/borra todo(s) …” → confirmación
+if (/\bborra(r)?\s+todos?\b/i.test(incoming)) {
     await ctx.reply("⚠️ ¿Seguro que quieres <b>borrar TODOS</b> tus recordatorios? Esta acción no se puede deshacer.", {
       parse_mode: "HTML",
       reply_markup: wipeKb
