@@ -533,14 +533,14 @@ Prueba con algo 100% cotidiano que usarás luego en segundos:
   2. Huevos  
   3. Papel higiénico\`
 • Cita dentista → \`#cita dentista - 15/11 16:00h\`
-Tu “yo del futuro” te lo va a agradecer 😅`
+Tu “yo del futuro” te lo va a agradecer 😅
 Solo Escribe para verlos \`?compra\` o \`?cita\` y verás la magia.`;
   const B =
 `🤔 Si lo dejas en la cabeza... se pierde.
 Guarda 1 cosa útil ahora y pruébame con \`?nombre\`:
 • PIN parking → \`#pin parking - 2781\`
 • Pedido online → \`#pedido Correos - 113-998877\`
-5 segundos para guardar; 1 segundo para encontrar 😉`
+5 segundos para guardar; 1 segundo para encontrar 😉
 Tip: con \`?*\` ves todo lo que llevas.`;
   return Math.random() < 0.5 ? A : B;
 }
@@ -555,15 +555,15 @@ Inspo rápida y muy real:
   2. Pan  
   3. Huevos\`
 • Cita → \`#cita pediatra - 10/10 09:30h\`
-Tres toques y tienes memoria turbo 💪`
-Escribe para verlos \`?Wifi\` o \`?compra\` o \`?cita\`;
+Tres toques y tienes memoria turbo 💪
+Escribe para verlos \`?Wifi\` o \`?compra\` o \`?cita\``;
   const B =
-`Vas muy bien!). Añade más ecordatorios y verás la magia escribiendo \`?*\`.
+`Ya guardaste 1 (¡bien!). Sube a 3 y verás la magia de \`?*\`.
 Ideas que salvan el día:
-• Cita → \`#cita pediatra - 10/10 09:30h\`
-• PIN que siempre olvidas → \`#pin trastero - 5402\`
+• Matrícula → \`#matrícula coche - 1234ABC\`
+• Factura → \`#factura luz - vence 12/11\`
 • Extraescolar → \`#clase inglés - lunes 17:30h\`
-Cuando lo necesites… aparecerá en 1 segundo.`;
+Solo escribe para verlos \`?compra\` o \`?cita\` y verás la magia.`;
   return Math.random() < 0.5 ? A : B;
 }
 function nudge3Text() {
