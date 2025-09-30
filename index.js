@@ -383,13 +383,14 @@ bot.command("pmf", async (ctx) => {
   );
 });
 
-// --- /top — Top consultas/guardados por semana o rango custom (solo admin) ---
+// --- /top — Top + totales por semana o rango custom (solo admin) ---
 bot.command("top", async (ctx) => {
   if (!(OWNER_CHAT_ID && ctx.from?.id === OWNER_CHAT_ID)) {
     return ctx.reply("Comando solo para admin.");
   }
+
   const raw = (ctx.match || "").trim();
-  const isYMD = (s) => /^\d{4}-\d{2}\-\d{2}$/.test(s);
+  const isYMD = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
   let since, until, label;
   if (!raw) {
@@ -429,23 +430,32 @@ bot.command("top", async (ctx) => {
       }
       return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
     };
+    const fmt = (arr) => (arr.length ? arr.map(([k, n], i) => `${i + 1}. ${k} (${n})`).join("\n") : "—");
 
-    let qSaves = supabase.from("events").select("meta, created_at, user_id").eq("type", "save").gte("created_at", since).lt("created_at", until);
-    let qQueries = supabase.from("events").select("meta, created_at, user_id").eq("type", "query").gte("created_at", since).lt("created_at", until);
+    // Consultas base
+    let qSaves = supabase
+      .from("events").select("meta, created_at, user_id")
+      .eq("type", "save").gte("created_at", since).lt("created_at", until);
+    let qQueries = supabase
+      .from("events").select("meta, created_at, user_id")
+      .eq("type", "query").gte("created_at", since).lt("created_at", until);
     if (OWNER_CHAT_ID) {
       qSaves = qSaves.neq("user_id", OWNER_CHAT_ID);
       qQueries = qQueries.neq("user_id", OWNER_CHAT_ID);
     }
 
-    const { data: saves } = await qSaves;
-    const { data: queries } = await qQueries;
+    const [{ data: saves }, { data: queries }] = await Promise.all([qSaves, qQueries]);
 
     const topSaves = tally(saves);
     const topQueries = tally(queries);
-    const fmt = (arr) => (arr.length ? arr.map(([k, n], i) => `${i + 1}. ${k} (${n})`).join("\n") : "—");
+
+    const totalSaves = saves?.length || 0;
+    const totalQueries = queries?.length || 0;
 
     await ctx.reply(
       `📌 <b>Top por ${label}</b>\n` +
+      `• Total guardados: <b>${totalSaves}</b>\n` +
+      `• Total consultas: <b>${totalQueries}</b>\n\n` +
       `<b>🔐 Top guardados</b>\n${fmt(topSaves)}\n\n` +
       `<b>🔎 Top consultas</b>\n${fmt(topQueries)}`,
       { parse_mode: "HTML" }
@@ -454,6 +464,7 @@ bot.command("top", async (ctx) => {
     await ctx.reply(`⚠️ Error en /top: ${e.message || e}`);
   }
 });
+
 
 // PMF: comandos de control
 bot.command("encuesta", async (ctx) => { await maybeAskPMF(ctx); });
@@ -518,32 +529,39 @@ function nudge1Text() {
 `👋 ¡Hey! Aún no has guardado nada en Reco.
 Prueba con algo 100% cotidiano que usarás luego en segundos:
 • Lista corta de compra → \`#compra octubre - 
-1. Plátanos  
-2. Huevos  
-3. Papel higiénico\`
+  1. Plátanos  
+  2. Huevos  
+  3. Papel higiénico\`
 • Cita dentista → \`#cita dentista - 15/11 16:00h\`
-Tu “yo del futuro” te lo va a agradecer 😅`;
+Tu “yo del futuro” te lo va a agradecer 😅`
+Solo Escribe para verlos \`?compra\` o \`?cita\` y verás la magia.`;
   const B =
-`🤔 Si sigues con la cabeza, se te van a caer los datos…
-Guarda 1 cosa útil ahora y pruébame mañana con \`?palabra\`:
+`🤔 Si lo dejas en la cabeza... se pierde.
+Guarda 1 cosa útil ahora y pruébame con \`?nombre\`:
 • PIN parking → \`#pin parking - 2781\`
-• Pedido online → \`#pedido Amazon - 113-998877\`
-5 segundos para guardar; 1 segundo para encontrar 😉`;
+• Pedido online → \`#pedido Correos - 113-998877\`
+5 segundos para guardar; 1 segundo para encontrar 😉`
+Tip: con \`?*\` ves todo lo que llevas.`;
   return Math.random() < 0.5 ? A : B;
 }
 function nudge2Text() {
   const A =
-`🔓 Con 3 cositas guardadas Reco empieza a brillar.
+`🔓 Con 3 cositas guardadas Reco despega.
+Añade 2 más y buscalos de forma rápida usando \`?nombre\`.
 Inspo rápida y muy real:
 • Wifi → \`#wifi casa - PepeWifi / clave123\`
-• Lista compra → \`#compra - 1. Leche  2. Pan  3. Huevos\`
+• Lista compra → \`#compra - 
+  1. Leche  
+  2. Pan  
+  3. Huevos\`
 • Cita → \`#cita pediatra - 10/10 09:30h\`
-Tres toques y tienes memoria turbo 💪`;
+Tres toques y tienes memoria turbo 💪`
+Escribe para verlos \`?Wifi\` o \`?compra\` o \`?cita\`;
   const B =
-`Ya guardaste 1 (¡bien!). Sube a 3 y verás la magia de \`?*\`.
+`Vas muy bien!). Añade más ecordatorios y verás la magia escribiendo \`?*\`.
 Ideas que salvan el día:
-• Matrícula → \`#matrícula coche - 1234ABC\`
-• Factura → \`#factura luz - vence 12/11\`
+• Cita → \`#cita pediatra - 10/10 09:30h\`
+• PIN que siempre olvidas → \`#pin trastero - 5402\`
 • Extraescolar → \`#clase inglés - lunes 17:30h\`
 Cuando lo necesites… aparecerá en 1 segundo.`;
   return Math.random() < 0.5 ? A : B;
@@ -562,7 +580,7 @@ Añade una súper cotidiana y pruébame mañana:
 • Compra finde → \`#compra finde - 1. Café  2. Arroz  3. Papel higiénico\`
 • Cita dentista → \`#dentista - 21/10 12:00h\`
 • PIN que siempre olvidas → \`#pin trastero - 5402\`
-Mañana escribe \`?compra\` o \`?pin\` y voilá 😄`;
+Prueba para verlos \`?compra\` o \`?cita\` y voilá 😄`;
   return Math.random() < 0.5 ? A : B;
 }
 
