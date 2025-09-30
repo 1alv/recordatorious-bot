@@ -1,4 +1,4 @@
-// index.js — Recordatorious (MVP + EDITAR + UX + PMF-early + feedback post-PMF + métricas avanzadas + Nudges + PrettyList)
+// index.js — Recordatorious (MVP + EDITAR + UX + PMF-early + feedback post-PMF + métricas avanzadas + Nudges + PrettyList + WipeAll)
 // Variables (Railway → Variables):
 // BOT_TOKEN, SUPABASE_URL, (SUPABASE_SERVICE_ROLE o SUPABASE_ANON_KEY), OWNER_CHAT_ID (opcional)
 // OPCIONALES: LOCAL_TZ (por defecto Europe/Madrid), PMF_DEBUG_ALWAYS ("1" para forzar PMF)
@@ -116,7 +116,7 @@ function prettyList(value) {
     return parts.map((p, i) => `${i + 1}. ${p}`).join("\n");
   }
 
-  // fallback: no parecía lista; intenta por ';' o ' · ' o '  -  '
+  // fallback: separadores comunes
   const parts2 = value.split(/\s*[;|•]\s+|\s+-\s+|\s+\|\s+/).map(v=>v.trim()).filter(Boolean);
   if (parts2.length >= 2) {
     return parts2.map((p, i) => `${i + 1}. ${p}`).join("\n");
@@ -129,13 +129,11 @@ function prettyList(value) {
 function renderRecordLine(keyText, value) {
   const v = prettyList(value);
   const niceKey = `#${String(keyText || "").replace(/^#/, "")}`;
-  if (/\n/.test(v)) {
-    return `${niceKey}  - \n${v}`;
-  }
+  if (/\n/.test(v)) return `${niceKey}  - \n${v}`;
   return `${niceKey}  - ${v}`;
 }
 
-// --- Mensajes (tu bienvenida intacta) ---
+// --- Mensajes ---
 const welcomeMsgHtml =
 `👋 ¡Hola! Espero que estés fenomenal.
 Soy <b>Reco</b>, tu micro-asistente personal en el chat para recordar cualquier dato simple.
@@ -180,10 +178,10 @@ Listar: ?*
 Ej.: #wifi casa - PepeWifi / clave123`;
 
 // --- PMF early ---
-const PMF_MIN_DISTINCT_DAYS = 5;   // pide encuesta a partir de 5 días distintos
-const PMF_COOLDOWN_DAYS = 90;      // no repetir pregunta si contestó en últimos 90 días
+const PMF_MIN_DISTINCT_DAYS = 5;
+const PMF_COOLDOWN_DAYS = 90;
 
-// Cuenta días distintos de uso desde los últimos 180 días
+// Días distintos de uso (últimos 180 días)
 async function countDistinctUsageDays(userId) {
   const since = new Date(Date.now() - 180 * 86400000).toISOString();
   const { data, error } = await supabase
@@ -199,7 +197,6 @@ async function countDistinctUsageDays(userId) {
   for (const row of data) days.add(fmt.format(new Date(row.created_at)));
   return days.size;
 }
-
 async function lastPmfAnswerWithin(userId, days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
   const { data, error } = await supabase
@@ -212,7 +209,6 @@ async function lastPmfAnswerWithin(userId, days) {
   if (error) return false;
   return (data && data.length > 0);
 }
-
 async function shouldAskPMF(userId) {
   if (PMF_DEBUG_ALWAYS) return true;
   const hasAnsweredRecently = await lastPmfAnswerWithin(userId, PMF_COOLDOWN_DAYS);
@@ -220,15 +216,12 @@ async function shouldAskPMF(userId) {
   const distinctDays = await countDistinctUsageDays(userId);
   return distinctDays >= PMF_MIN_DISTINCT_DAYS;
 }
-
 async function maybeAskPMF(ctx) {
   const userId = ctx.from.id;
   if (!(await shouldAskPMF(userId))) return;
-
   const kb = new InlineKeyboard()
     .text("1", "pmf:1").text("2", "pmf:2").text("3", "pmf:3").row()
     .text("4", "pmf:4").text("5", "pmf:5");
-
   await ctx.reply(
     "🙏 Mini-encuesta: ¿Cuánto te molestaría NO poder usar Reco?\n(1 = nada, 5 = muchísimo)",
     { reply_markup: kb }
@@ -272,12 +265,24 @@ bot.command("stats", async (ctx) => {
       recCount = count ?? 0;
     }
 
-    // Usuarios únicos de verdad (12 meses)
+    // Eventos 12 meses (para uniques y firstSeen)
     const since365 = new Date(Date.now() - 365 * 86400000).toISOString();
     let qAll = supabase.from("events").select("user_id, type, created_at, meta").gte("created_at", since365).limit(100000);
     if (excludeOwner) qAll = qAll.neq("user_id", OWNER_CHAT_ID);
     const { data: evAll } = await qAll;
+
     const uniqAll = new Set((evAll || []).map(e => e.user_id)).size;
+
+    // Nuevos últimos 7 días (firstSeen dentro de 7d)
+    const firstSeen = new Map(); // uid -> date
+    for (const e of evAll || []) {
+      const t = new Date(e.created_at);
+      const p = firstSeen.get(e.user_id);
+      if (!p || t < p) firstSeen.set(e.user_id, t);
+    }
+    const sevenAgo = new Date(Date.now() - 7 * 86400000);
+    let new7d = 0;
+    for (const d of firstSeen.values()) if (d >= sevenAgo) new7d++;
 
     // Activos últimos 7 días
     const since7 = new Date(Date.now() - 7 * 86400000).toISOString();
@@ -306,27 +311,24 @@ bot.command("stats", async (ctx) => {
     if (excludeOwner) q60 = q60.neq("user_id", OWNER_CHAT_ID);
     const { data: ev60 } = await q60;
 
-    const firstSeen = new Map(); // userId -> firstDate
+    const firstSeen60 = new Map(); // userId -> firstDate
     const daysWithinWeek = new Map(); // userId -> Set(YYYY-MM-DD) dentro de la primera semana
 
     for (const e of ev60 || []) {
       const uid = e.user_id;
       const t = new Date(e.created_at);
-      if (!firstSeen.has(uid)) {
-        firstSeen.set(uid, t);
+      if (!firstSeen60.has(uid)) {
+        firstSeen60.set(uid, t);
         daysWithinWeek.set(uid, new Set([fmtYMD(t)]));
       } else {
-        const start = firstSeen.get(uid);
+        const start = firstSeen60.get(uid);
         const diff = (t - start) / 86400000;
-        if (diff < 7) {
-          daysWithinWeek.get(uid)?.add(fmtYMD(t));
-        }
+        if (diff < 7) daysWithinWeek.get(uid)?.add(fmtYMD(t));
       }
     }
-    // Cohorte: usuarios cuyo firstSeen es en últimos 30 días
     const cohortSince = new Date(Date.now() - 30 * 86400000);
     let cohort = 0, retained = 0;
-    for (const [uid, start] of firstSeen.entries()) {
+    for (const [uid, start] of firstSeen60.entries()) {
       if (start >= cohortSince) {
         cohort++;
         const set = daysWithinWeek.get(uid) || new Set();
@@ -339,6 +341,7 @@ bot.command("stats", async (ctx) => {
       `📊 <b>Estadísticas Reco</b>\n\n` +
       `• Recordatorios guardados: <b>${recCount}</b>\n` +
       `• Usuarios únicos (12 meses): <b>${uniqAll}</b>\n` +
+      `• <u>Nuevos últimos 7 días</u>: <b>${new7d}</b>\n` +
       `• Activos últimos 7 días: <b>${active7d}</b>\n` +
       `• Fallos de formato (30d): <b>${(errRate * 100).toFixed(1)}%</b>  (${unrec}/${totalTracked})\n` +
       `• Retención 7d (cohorte 30d): <b>${(retention7d * 100).toFixed(1)}%</b>  (${retained}/${cohort})`,
@@ -352,10 +355,9 @@ bot.command("stats", async (ctx) => {
 // --- /pmf: distribución respuestas PMF ---
 bot.command("pmf", async (ctx) => {
   let q = supabase.from("pmf_answers").select("score");
-  if (OWNER_CHAT_ID) q = q.neq("user_id", OWNER_CHAT_ID); // por coherencia
+  if (OWNER_CHAT_ID) q = q.neq("user_id", OWNER_CHAT_ID);
   const { data, error } = await q;
-  if (error || !data) return ctx.reply("📭 Aún no hay respuestas PMF.");
-  if (data.length === 0) return ctx.reply("📭 Aún no hay respuestas PMF.");
+  if (error || !data || data.length === 0) return ctx.reply("📭 Aún no hay respuestas PMF.");
 
   const total = data.length;
   const dist = [1,2,3,4,5].map(s => ({ s, n: data.filter(d => d.score === s).length }));
@@ -453,8 +455,10 @@ bot.command("debugpmf", async (ctx) => {
   );
 });
 
-// Reacciones rápidas (👍/👎) y PMF
+// Reacciones rápidas (👍/👎) y PMF + wipe
 const uxKeyboard = (action) => new InlineKeyboard().text("👍 Útil", `ux:${action}:1`).text("👎 No", `ux:${action}:0`);
+const wipeKb = new InlineKeyboard().text("✅ Sí, borrar todo", "wipe:yes").text("❌ No, cancelar", "wipe:no");
+
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data || "";
 
@@ -464,27 +468,40 @@ bot.on("callback_query:data", async (ctx) => {
     const score = Number(pmf[1]);
     await supabase.from("pmf_answers").insert({ user_id: ctx.from.id, score });
     await ctx.answerCallbackQuery({ text: `¡Gracias! (${score}/5)` });
-
-    // Feedback libre 5 min
     setAwaitingFeedback(ctx.from.id);
-    await ctx.reply(
-      "🙏 Para ayudarme a mejorar, cuéntame AQUÍ MISMO en una frase: ¿qué echarías más de menos si no pudieras usar Reco?\n" +
-      "✍️ Escribe tu comentario debajo."
-    );
+    await ctx.reply("🙏 Para ayudarme a mejorar, cuéntame AQUÍ MISMO en una frase: ¿qué echarías más de menos si no pudieras usar Reco?\n✍️ Escribe tu comentario debajo.");
+    return;
+  }
+
+  // WIPE ALL callback
+  if (data === "wipe:yes" || data === "wipe:no") {
+    if (data === "wipe:no") {
+      await ctx.answerCallbackQuery({ text: "Cancelar borrado" });
+      return ctx.editMessageText("Operación cancelada. No se borró nada.");
+    }
+    // Contar y borrar
+    await ctx.answerCallbackQuery({ text: "Borrando…" });
+    const { count } = await supabase.from("records").select("*", { count: "exact", head: true }).eq("user_id", ctx.from.id);
+    await supabase.from("records").delete().eq("user_id", ctx.from.id);
+    await supabase.from("events").insert({ user_id: ctx.from.id, type: "wipe_all", meta: { deleted: count || 0 } });
+    try { await ctx.editMessageText(`🧹 He borrado ${count || 0} recordatorios.`); } catch {}
     return;
   }
 
   // UX quick reactions
   const m = data.match(/^ux:(save|query|delete|edit):(1|0)$/);
-  if (!m) return ctx.answerCallbackQuery();
-  const action = m[1];
-  const useful = m[2] === "1";
-  await supabase.from("quick_reactions").insert({ user_id: ctx.from.id, action, useful });
-  await ctx.answerCallbackQuery({ text: useful ? "¡Muchas Gracias! 🙌" : "Muchas Gracias por avisar 💡" });
+  if (m) {
+    const action = m[1];
+    const useful = m[2] === "1";
+    await supabase.from("quick_reactions").insert({ user_id: ctx.from.id, action, useful });
+    return ctx.answerCallbackQuery({ text: useful ? "¡Muchas Gracias! 🙌" : "Muchas Gracias por avisar 💡" });
+  }
+
+  // default
+  return ctx.answerCallbackQuery();
 });
 
 // === NUDGES ===================================================================
-// Textos (dos variantes por nudge, rota aleatoriamente)
 function nudge1Text() {
   const A =
 `👋 ¡Hey! Aún no has guardado nada en Reco.
@@ -562,10 +579,7 @@ async function nudgeAlreadySentWithin(uid, nudgeType, days) {
   return !!(data && data.length);
 }
 
-// Reglas:
-// - NUDGE 1: 0 guardados, han pasado ≥24h desde /start y no enviado nudge1 en 7d
-// - NUDGE 2: 1 guardado, han pasado ≥48h desde último save y no enviado nudge2 en 14d
-// - NUDGE 3: exactamente 3 guardados, han pasado ≥5 días desde último save y no enviado nudge3 en 30d
+// Reglas NUDGES
 async function maybeSendNudges(ctx) {
   const uid = ctx.from.id;
 
@@ -608,8 +622,6 @@ async function maybeSendNudges(ctx) {
   }
 }
 
-// === FIN NUDGES ===============================================================
-
 // --- Handler principal ---
 bot.on("message:text", async (ctx) => {
   const original = ctx.message.text || "";
@@ -635,6 +647,17 @@ bot.on("message:text", async (ctx) => {
     }
   }
 
+  // 0-bis) Frases “borrar todo(s) …” → confirmación
+  if (/\bborrar\s+todos?\b/i.test(incoming)) {
+    await ctx.reply("⚠️ ¿Seguro que quieres <b>borrar TODOS</b> tus recordatorios? Esta acción no se puede deshacer.", {
+      parse_mode: "HTML",
+      reply_markup: wipeKb
+    });
+    // Métrica
+    await supabase.from("events").insert({ user_id: ctx.from.id, type: "wipe_prompt", meta: null });
+    return;
+  }
+
   const lines = incoming.split(/(?:\r?\n|(?=#))/).map(l => l.trim()).filter(Boolean);
   const outputs = [];
 
@@ -645,16 +668,13 @@ bot.on("message:text", async (ctx) => {
       const page = Math.max(1, parseInt(m?.[1] || "1", 10));
       const pageSize = 50;
 
-      let q = supabase
+      const res = await supabase
         .from("records")
         .select("key_text,value", { count: "exact" })
         .eq("user_id", ctx.from.id)
         .order("created_at", { ascending: false })
         .range((page - 1) * pageSize, page * pageSize - 1);
 
-      const res = await q;
-
-      // Log de evento para métricas
       await supabase.from("events").insert({ user_id: ctx.from.id, type: "list", meta: null });
 
       if (res.error) outputs.push(`⚠️ Error listando: ${res.error.message}`);
@@ -664,9 +684,7 @@ bot.on("message:text", async (ctx) => {
         const total = res.count ?? res.data.length;
         const maxPage = Math.max(1, Math.ceil(total / pageSize));
         const header = `🗂️ Tus registros (página ${page}/${maxPage}, total ${total})`;
-        const body = res.data
-          .map(r => renderRecordLine(r.key_text, r.value))
-          .join("\n\n");
+        const body = res.data.map(r => renderRecordLine(r.key_text, r.value)).join("\n\n");
         outputs.push(`${header}\n${body}\n\n➡️ Usa \`?* ${page + 1}\` para la siguiente página.`);
       }
       continue;
@@ -717,10 +735,7 @@ bot.on("message:text", async (ctx) => {
       await supabase.from("events").insert({ user_id: ctx.from.id, type: "edit", meta: { key_norm: keyNorm } });
 
       if (upErr) outputs.push(`⚠️ Error actualizando "${rawKey}": ${upErr.message}`);
-      else {
-        const nice = renderRecordLine(updated.key_text, updated.value);
-        outputs.push(`📝 Actualizado:\n${nice} ✅`);
-      }
+      else outputs.push(`📝 Actualizado:\n${renderRecordLine(updated.key_text, updated.value)} ✅`);
 
       if (shouldAsk(ctx.from.id, "edit")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("edit") });
       continue;
@@ -731,29 +746,23 @@ bot.on("message:text", async (ctx) => {
       const q = toPlainSpaces(line.replace(/^\?\s*/, ""));
       const keyNorm = normalizeKey(q);
 
-      let qr = supabase
+      const { data, error } = await supabase
         .from("records").select("key_text,value")
         .eq("user_id", ctx.from.id)
         .ilike("key_norm", `%${keyNorm}%`).limit(50);
-
-      const { data, error } = await qr;
 
       await supabase.from("events").insert({ user_id: ctx.from.id, type: "query", meta: { key_norm: keyNorm, results: data ? data.length : 0 } });
 
       if (error) outputs.push(`⚠️ Error consultando "${q}": ${error.message}`);
       else if (!data || data.length === 0) outputs.push(`⚠️ No encontré "${q}"`);
-      else if (data.length === 1) {
-        const r = data[0];
-        outputs.push(`🔍 ${renderRecordLine(r.key_text, r.value)}`);
-      } else {
-        outputs.push("🔎 Coincidencias:\n" + data.map(r => `• ${renderRecordLine(r.key_text, r.value)}`).join("\n\n"));
-      }
+      else if (data.length === 1) outputs.push(`🔍 ${renderRecordLine(data[0].key_text, data[0].value)}`);
+      else outputs.push("🔎 Coincidencias:\n" + data.map(r => `• ${renderRecordLine(r.key_text, r.value)}`).join("\n\n"));
 
       if (shouldAsk(ctx.from.id, "query")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("query") });
       continue;
     }
 
-    // 5) BORRAR
+    // 5) BORRAR UNITARIO
     m = line.match(DEL_RE);
     if (m) {
       const rawKey = toPlainSpaces(m[1]);
@@ -774,7 +783,7 @@ bot.on("message:text", async (ctx) => {
 
     // 6) No reconocido → registramos para error-rate
     outputs.push(
-      "⚠️ Formato no reconocido. Usa:\n" +
+      "⚠️ Perdona, ese formato no me suena. Usa:\n" +
       "#nombre - valor  (— o – también valen)\n" +
       "Consultar: ?nombre  |  Listar: ?*\n" +
       "Editar: ?+nombre - nuevo valor  |  Borrar: -nombre"
@@ -784,7 +793,7 @@ bot.on("message:text", async (ctx) => {
 
   await replySmart(ctx, outputs.join("\n"));
 
-  // PMF al final de cada interacción
+  // PMF: al final de interacción (respeta cooldown y días)
   await maybeAskPMF(ctx);
 
   // NUDGES al final (no bloquea y respeta ventanas)
@@ -793,4 +802,3 @@ bot.on("message:text", async (ctx) => {
 
 // --- Arranque ---
 bot.start({ onStart: () => console.log("✅ Recordatorious bot is running…") });
-
