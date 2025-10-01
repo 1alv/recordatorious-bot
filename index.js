@@ -1,4 +1,4 @@
-// index.js — Recordatorious (MVP + EDITAR + UX + PMF-early + feedback post-PMF + métricas avanzadas + Nudges + PrettyList + WipeAll)
+// index.js — Recordatorious (MVP + EDITAR + UX + PMF-early + feedback post-PMF + métricas avanzadas + Nudges + PrettyList + WipeAll + FriendlyCards)
 // Variables (Railway → Variables):
 // BOT_TOKEN, SUPABASE_URL, (SUPABASE_SERVICE_ROLE o SUPABASE_ANON_KEY), OWNER_CHAT_ID (opcional)
 // OPCIONALES: LOCAL_TZ (por defecto Europe/Madrid), PMF_DEBUG_ALWAYS ("1" para forzar PMF)
@@ -100,38 +100,74 @@ const normalizeKey = (s) =>
     .replace(/\s+/g, " ")
     .trim();
 
-// === Pretty list: convierte "1. a 2. b 3. c" o "• a - b" en líneas ===
-function prettyList(value) {
+/* ===================== FRIENDLY CARDS (estilo "canal") ===================== */
+
+// Número a emoji 1️⃣…🔟
+function numEmoji(n) {
+  const map = ["0️⃣","1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"];
+  return map[n] || "•";
+}
+// Título capitalizado sin #
+function titleCase(s="") {
+  s = String(s).replace(/^#/, "").trim();
+  if (!s) return "";
+  return s[0].toUpperCase() + s.slice(1);
+}
+// Emoji por tipo de clave
+function emojiForKey(key="") {
+  const k = normalizeKey(key);
+  if (/\bcumple|cumples|birthday/.test(k)) return "🎂";
+  if (/\bcita|medico|dentista|pediatra/.test(k)) return "🩺";
+  if (/\bwifi|clave|password|pass|pin/.test(k)) return "🔐";
+  if (/\bcompra|super|lista/.test(k)) return "🛒";
+  if (/\bmatricula|coche|car/.test(k)) return "🚗";
+  if (/\bfactura|luz|gas|agua/.test(k)) return "🧾";
+  if (/\btalla|zapat|ropa/.test(k)) return "👟";
+  if (/\bseguro|poliza/.test(k)) return "🛡️";
+  if (/\bvuelo|billete|tren|avion/.test(k)) return "✈️";
+  if (/\bpedido|amazon|correos|envio/.test(k)) return "📦";
+  return "📌";
+}
+// Convierte valores en bullets (acepta "1. a 2. b", "• a - b", líneas, etc.)
+function prettyListToBullets(value) {
   if (!value) return "";
-  if (/\n/.test(value)) return value; // ya es multilínea
-
-  // Separa por numeraciones (1. 2) 3.) o bullets (• · - – —)
-  const parts = value
-    .split(/\s*(?:\d+[.)]|[•·\-–—])\s+/)
-    .map(v => v.trim())
-    .filter(Boolean);
-
-  if (parts.length >= 2) {
-    // Re-numera limpio 1..n
-    return parts.map((p, i) => `${i + 1}. ${p}`).join("\n");
+  // si ya viene multilinea: normalizamos prefijos
+  if (/\n/.test(value)) {
+    return value
+      .split(/\r?\n/)
+      .map(x => x.trim())
+      .filter(Boolean)
+      .map(x => x.replace(/^\s*(?:\d+[.)]|[•·\-–—])\s*/, "• ").trim())
+      .join("\n");
   }
-
-  // fallback: separadores comunes
+  // separar por numeración o bullets inline
+  const parts = value.split(/\s*(?:\d+[.)]|[•·\-–—])\s+/).map(v=>v.trim()).filter(Boolean);
+  if (parts.length >= 2) return parts.map(p => `• ${p}`).join("\n");
+  // separadores comunes
   const parts2 = value.split(/\s*[;|•]\s+|\s+-\s+|\s+\|\s+/).map(v=>v.trim()).filter(Boolean);
-  if (parts2.length >= 2) {
-    return parts2.map((p, i) => `${i + 1}. ${p}`).join("\n");
+  if (parts2.length >= 2) return parts2.map(p => `• ${p}`).join("\n");
+  // sin lista
+  return `• ${value}`;
+}
+// Tarjeta para listados (?*)
+function renderRecordCard(keyText, value, idx=1) {
+  const icon = emojiForKey(keyText);
+  const title = titleCase(keyText);
+  const bullets = prettyListToBullets(value);
+  return `${numEmoji(idx)} <b>${title}</b> ${icon}\n${bullets}`;
+}
+// Inline para consultas unitarias (?clave) y mensajes de guardado/edición
+function renderRecordInline(keyText, value) {
+  const icon = emojiForKey(keyText);
+  const title = `#${String(keyText || "").replace(/^#/, "")}`;
+  const bullets = prettyListToBullets(value);
+  if (/\n/.test(bullets) || /^• /.test(bullets)) {
+    return `<b>${title}</b> ${icon}\n${bullets}`;
   }
-
-  return value;
+  return `<b>${title}</b> ${icon} — ${bullets.replace(/^•\s*/, "")}`;
 }
 
-// Para mostrar un registro en una sola “tarjeta” amable
-function renderRecordLine(keyText, value) {
-  const v = prettyList(value);
-  const niceKey = `#${String(keyText || "").replace(/^#/, "")}`;
-  if (/\n/.test(v)) return `${niceKey}  - \n${v}`;
-  return `${niceKey}  - ${v}`;
-}
+/* ===================== FIN FRIENDLY CARDS ================================== */
 
 // --- Mensajes ---
 const welcomeMsgHtml =
@@ -745,8 +781,10 @@ bot.on("message:text", async (ctx) => {
         const total = res.count ?? res.data.length;
         const maxPage = Math.max(1, Math.ceil(total / pageSize));
         const header = `🗂️ Tus registros (página ${page}/${maxPage}, total ${total})`;
-        const body = res.data.map(r => renderRecordLine(r.key_text, r.value)).join("\n\n");
-        outputs.push(`${header}\n${body}\n\n➡️ Usa \`?* ${page + 1}\` para la siguiente página.`);
+        const body = res.data
+          .map((r, i) => renderRecordCard(r.key_text, r.value, (page - 1) * pageSize + (i + 1)))
+          .join("\n\n");
+        outputs.push(`${header}\n\n${body}\n\n➡️ Usa \`?* ${page + 1}\` para la siguiente página.`);
       }
       continue;
     }
@@ -764,7 +802,7 @@ bot.on("message:text", async (ctx) => {
 
       await supabase.from("events").insert({ user_id: ctx.from.id, type: "save", meta: { key_norm: keyNorm } });
 
-      const nice = renderRecordLine(rawKey, value);
+      const nice = renderRecordInline(rawKey, value);
       outputs.push(error ? `⚠️ Error guardando "${rawKey}": ${error.message}` : `✅ Guardado:\n${nice}`);
 
       if (shouldAsk(ctx.from.id, "save")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("save") });
@@ -796,7 +834,7 @@ bot.on("message:text", async (ctx) => {
       await supabase.from("events").insert({ user_id: ctx.from.id, type: "edit", meta: { key_norm: keyNorm } });
 
       if (upErr) outputs.push(`⚠️ Error actualizando "${rawKey}": ${upErr.message}`);
-      else outputs.push(`📝 Actualizado:\n${renderRecordLine(updated.key_text, updated.value)} ✅`);
+      else outputs.push(`📝 Actualizado:\n${renderRecordInline(updated.key_text, updated.value)} ✅`);
 
       if (shouldAsk(ctx.from.id, "edit")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("edit") });
       continue;
@@ -816,8 +854,12 @@ bot.on("message:text", async (ctx) => {
 
       if (error) outputs.push(`⚠️ Error consultando "${q}": ${error.message}`);
       else if (!data || data.length === 0) outputs.push(`⚠️ No encontré "${q}"`);
-      else if (data.length === 1) outputs.push(`🔍 ${renderRecordLine(data[0].key_text, data[0].value)}`);
-      else outputs.push("🔎 Coincidencias:\n" + data.map(r => `• ${renderRecordLine(r.key_text, r.value)}`).join("\n\n"));
+      else if (data.length === 1) {
+        outputs.push(`🔍 ${renderRecordInline(data[0].key_text, data[0].value)}`);
+      } else {
+        const cards = data.map((r, i) => renderRecordCard(r.key_text, r.value, i + 1)).join("\n\n");
+        outputs.push(`🔎 <b>Coincidencias</b>\n\n${cards}`);
+      }
 
       if (shouldAsk(ctx.from.id, "query")) await ctx.reply("¿Te fue útil?", { reply_markup: uxKeyboard("query") });
       continue;
@@ -852,7 +894,8 @@ bot.on("message:text", async (ctx) => {
     await supabase.from("events").insert({ user_id: ctx.from.id, type: "unrecognized", meta: { sample: line.slice(0, 100) } });
   }
 
-  await replySmart(ctx, outputs.join("\n"));
+  // ⬇️ Ahora enviamos el bloque con HTML para que se vean títulos/bullets/emoji
+  await replySmart(ctx, outputs.join("\n"), { parse_mode: "HTML" });
 
   // PMF: al final de interacción (respeta cooldown y días)
   await maybeAskPMF(ctx);
